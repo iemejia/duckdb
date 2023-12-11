@@ -216,7 +216,7 @@ jobs:
        with:
          fetch-depth: 0
 
-     - uses: actions/setup-python@v2
+     - uses: actions/setup-python@v5
        with:
          python-version: '3.7'
 
@@ -365,7 +365,7 @@ jobs:
       run: git clone https://github.com/duckdb/duckdb-web
 
     - name: Set up Python 3.9
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
 
@@ -471,7 +471,7 @@ jobs:
       with:
         fetch-depth: 0
 
-    - uses: actions/setup-python@v2
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.7'
 
