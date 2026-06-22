@@ -7,10 +7,8 @@ import tempfile
 regression_threshold_percentage = 0.05
 
 parser = argparse.ArgumentParser(description='Generate TPC-DS reference results from Postgres.')
-parser.add_argument('--old', dest='old_runner',
-                     action='store', help='Path to the old shell executable')
-parser.add_argument('--new', dest='new_runner',
-                     action='store', help='Path to the new shell executable')
+parser.add_argument('--old', dest='old_runner', action='store', help='Path to the old shell executable')
+parser.add_argument('--new', dest='new_runner', action='store', help='Path to the new shell executable')
 
 args = parser.parse_args()
 
@@ -26,10 +24,22 @@ if not os.path.isfile(new_runner):
     print(f"Failed to find new runner {new_runner}")
     exit(1)
 
+
 def load_data(shell_path, load_script):
     with tempfile.NamedTemporaryFile() as f:
         filename = f.name
-    proc = subprocess.Popen([shell_path, '-c', load_script, filename])
+    proc = subprocess.Popen(
+        [
+            shell_path,
+            '-storage_version',
+            'latest',
+            '-c',
+            "set storage_compatibility_version='latest'",
+            '-c',
+            load_script,
+            filename,
+        ]
+    )
     proc.wait()
     if proc.returncode != 0:
         print('----------------------------')
@@ -37,6 +47,7 @@ def load_data(shell_path, load_script):
         print('----------------------------')
         return None
     return os.path.getsize(filename)
+
 
 def run_benchmark(load_script, benchmark_name):
     print('----------------------------')
@@ -61,14 +72,12 @@ def run_benchmark(load_script, benchmark_name):
         print('----------------------------')
     return True
 
+
 tpch_load = 'CALL dbgen(sf=1);'
 tpcds_load = 'CALL dsdgen(sf=1);'
 
 
-benchmarks = [
-    [tpch_load, 'TPC-H SF1'],
-    [tpcds_load, 'TPC-DS SF1']
-]
+benchmarks = [[tpch_load, 'TPC-H SF1'], [tpcds_load, 'TPC-DS SF1']]
 
 for benchmark in benchmarks:
     if not run_benchmark(benchmark[0], benchmark[1]):

@@ -10,7 +10,6 @@
 
 #include "duckdb/parser/parsed_expression.hpp"
 #include "duckdb/parser/query_node.hpp"
-#include "duckdb/parser/sql_statement.hpp"
 #include "duckdb/parser/tableref.hpp"
 #include "duckdb/parser/parsed_data/sample_options.hpp"
 #include "duckdb/parser/group_by_node.hpp"
@@ -21,7 +20,10 @@ namespace duckdb {
 //! SelectNode represents a standard SELECT statement
 class SelectNode : public QueryNode {
 public:
-	SelectNode();
+	static constexpr const QueryNodeType TYPE = QueryNodeType::SELECT_NODE;
+
+public:
+	DUCKDB_API SelectNode();
 
 	//! The projection list
 	vector<unique_ptr<ParsedExpression>> select_list;
@@ -40,22 +42,21 @@ public:
 	//! The SAMPLE clause
 	unique_ptr<SampleOptions> sample;
 
-	const vector<unique_ptr<ParsedExpression>> &GetSelectList() const override {
-		return select_list;
-	}
-
 public:
 	//! Convert the query node to a string
 	string ToString() const override;
 
 	bool Equals(const QueryNode *other) const override;
+
 	//! Create a copy of this SelectNode
 	unique_ptr<QueryNode> Copy() const override;
 
 	//! Serializes a QueryNode to a stand-alone binary blob
-	void Serialize(FieldWriter &writer) const override;
+
 	//! Deserializes a blob back into a QueryNode
-	static unique_ptr<QueryNode> Deserialize(FieldReader &reader);
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<QueryNode> Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

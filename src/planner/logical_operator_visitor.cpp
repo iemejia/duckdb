@@ -6,22 +6,92 @@
 
 namespace duckdb {
 
+void LogicalOperatorVisitor::VisitOperator(unique_ptr<LogicalOperator> &op) {
+	VisitOperator(*op);
+}
+
 void LogicalOperatorVisitor::VisitOperator(LogicalOperator &op) {
 	VisitOperatorChildren(op);
 	VisitOperatorExpressions(op);
 }
 
 void LogicalOperatorVisitor::VisitOperatorChildren(LogicalOperator &op) {
-	for (auto &child : op.children) {
-		VisitOperator(*child);
+	if (op.HasProjectionMap()) {
+		VisitOperatorWithProjectionMapChildren(op);
+	} else {
+		for (auto &child : op.children) {
+			VisitOperator(child);
+		}
 	}
+}
+
+void LogicalOperatorVisitor::VisitOperatorWithProjectionMapChildren(LogicalOperator &op) {
+	D_ASSERT(op.HasProjectionMap());
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_ANY_JOIN:
+	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
+		auto &join = op.Cast<LogicalJoin>();
+		VisitChildOfOperatorWithProjectionMap(op.children[0], join.left_projection_map);
+		VisitChildOfOperatorWithProjectionMap(op.children[1], join.right_projection_map);
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_ORDER_BY: {
+		auto &order = op.Cast<LogicalOrder>();
+		VisitChildOfOperatorWithProjectionMap(op.children[0], order.projection_map);
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_FILTER: {
+		auto &filter = op.Cast<LogicalFilter>();
+		VisitChildOfOperatorWithProjectionMap(op.children[0], filter.projection_map);
+		break;
+	}
+	default:
+		throw NotImplementedException("VisitOperatorWithProjectionMapChildren for %s", EnumUtil::ToString(op.type));
+	}
+}
+
+void LogicalOperatorVisitor::VisitChildOfOperatorWithProjectionMap(unique_ptr<LogicalOperator> &child,
+                                                                   vector<ProjectionIndex> &projection_map) {
+	const auto child_bindings_before = child->GetColumnBindings();
+	VisitOperator(child);
+	if (projection_map.empty()) {
+		return; // Nothing to fix here
+	}
+	// Child binding order may have changed due to 'fun'.
+	const auto child_bindings_after = child->GetColumnBindings();
+	if (child_bindings_before == child_bindings_after) {
+		return; // Nothing changed
+	}
+	// The desired order is 'projection_map' applied to 'child_bindings_before'
+	// We create 'new_projection_map', which ensures this order even if 'child_bindings_after' is different
+	vector<ProjectionIndex> new_projection_map;
+	new_projection_map.reserve(projection_map.size());
+	for (const auto proj_idx_before : projection_map) {
+		auto &desired_binding = child_bindings_before[proj_idx_before];
+		idx_t proj_idx_after;
+		for (proj_idx_after = 0; proj_idx_after < child_bindings_after.size(); proj_idx_after++) {
+			if (child_bindings_after[proj_idx_after] == desired_binding) {
+				break;
+			}
+		}
+		if (proj_idx_after == child_bindings_after.size()) {
+			// VisitOperator has removed this binding, e.g., by replacing one binding with another
+			// Inside here we don't know how it has been replaced, and projection maps are positional: bail
+			new_projection_map.clear();
+			break;
+		}
+		new_projection_map.push_back(ProjectionIndex(proj_idx_after));
+	}
+	projection_map = std::move(new_projection_map);
 }
 
 void LogicalOperatorVisitor::EnumerateExpressions(LogicalOperator &op,
                                                   const std::function<void(unique_ptr<Expression> *child)> &callback) {
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_EXPRESSION_GET: {
-		auto &get = (LogicalExpressionGet &)op;
+		auto &get = op.Cast<LogicalExpressionGet>();
 		for (auto &expr_list : get.expressions) {
 			for (auto &expr : expr_list) {
 				callback(&expr);
@@ -30,70 +100,119 @@ void LogicalOperatorVisitor::EnumerateExpressions(LogicalOperator &op,
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_ORDER_BY: {
-		auto &order = (LogicalOrder &)op;
+		auto &order = op.Cast<LogicalOrder>();
 		for (auto &node : order.orders) {
 			callback(&node.expression);
 		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_TOP_N: {
-		auto &order = (LogicalTopN &)op;
+		auto &order = op.Cast<LogicalTopN>();
 		for (auto &node : order.orders) {
 			callback(&node.expression);
 		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_DISTINCT: {
-		auto &distinct = (LogicalDistinct &)op;
+		auto &distinct = op.Cast<LogicalDistinct>();
 		for (auto &target : distinct.distinct_targets) {
 			callback(&target);
 		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
-		if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
-			auto &delim_join = (LogicalDelimJoin &)op;
-			for (auto &expr : delim_join.duplicate_eliminated_columns) {
-				callback(&expr);
+		if (distinct.order_by) {
+			for (auto &order : distinct.order_by->orders) {
+				callback(&order.expression);
 			}
 		}
-		auto &join = (LogicalComparisonJoin &)op;
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_RECURSIVE_CTE: {
+		auto &rec = op.Cast<LogicalRecursiveCTE>();
+
+		for (auto &target : rec.key_targets) {
+			callback(&target);
+		}
+		for (auto &aggregate : rec.payload_aggregates) {
+			callback(&aggregate);
+		}
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_INSERT: {
+		auto &insert = op.Cast<LogicalInsert>();
+		if (insert.on_conflict_info.on_conflict_condition) {
+			callback(&insert.on_conflict_info.on_conflict_condition);
+		}
+		if (insert.on_conflict_info.do_update_condition) {
+			callback(&insert.on_conflict_info.do_update_condition);
+		}
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
+		auto &join = op.Cast<LogicalDependentJoin>();
+		for (auto &expr : join.duplicate_eliminated_columns) {
+			callback(&expr);
+		}
 		for (auto &cond : join.conditions) {
-			callback(&cond.left);
-			callback(&cond.right);
+			callback(&cond.LeftReference());
+			callback(&cond.RightReference());
+		}
+		for (auto &expr : join.arbitrary_expressions) {
+			callback(&expr);
+		}
+		for (auto &expr : join.expression_children) {
+			callback(&expr);
+		}
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		for (auto &expr : join.duplicate_eliminated_columns) {
+			callback(&expr);
+		}
+		for (auto &cond : join.conditions) {
+			if (cond.IsComparison()) {
+				callback(&cond.LeftReference());
+				callback(&cond.RightReference());
+			} else {
+				callback(&cond.JoinExpressionReference());
+			}
 		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_ANY_JOIN: {
-		auto &join = (LogicalAnyJoin &)op;
+		auto &join = op.Cast<LogicalAnyJoin>();
 		callback(&join.condition);
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_LIMIT: {
-		auto &limit = (LogicalLimit &)op;
-		if (limit.limit) {
-			callback(&limit.limit);
+		auto &limit = op.Cast<LogicalLimit>();
+		if (limit.limit_val.GetExpression()) {
+			callback(&limit.limit_val.GetExpression());
 		}
-		if (limit.offset) {
-			callback(&limit.offset);
-		}
-		break;
-	}
-	case LogicalOperatorType::LOGICAL_LIMIT_PERCENT: {
-		auto &limit = (LogicalLimitPercent &)op;
-		if (limit.limit) {
-			callback(&limit.limit);
-		}
-		if (limit.offset) {
-			callback(&limit.offset);
+		if (limit.offset_val.GetExpression()) {
+			callback(&limit.offset_val.GetExpression());
 		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
-		auto &aggr = (LogicalAggregate &)op;
+		auto &aggr = op.Cast<LogicalAggregate>();
 		for (auto &group : aggr.groups) {
 			callback(&group);
+		}
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_MERGE_INTO: {
+		auto &merge_into = op.Cast<LogicalMergeInto>();
+		for (auto &entry : merge_into.actions) {
+			for (auto &action : entry.second) {
+				if (action->condition) {
+					callback(&action->condition);
+				}
+				for (auto &expr : action->expressions) {
+					callback(&expr);
+				}
+			}
 		}
 		break;
 	}
@@ -114,58 +233,52 @@ void LogicalOperatorVisitor::VisitExpression(unique_ptr<Expression> *expression)
 	unique_ptr<Expression> result;
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_AGGREGATE:
-		result = VisitReplace((BoundAggregateExpression &)expr, expression);
-		break;
-	case ExpressionClass::BOUND_BETWEEN:
-		result = VisitReplace((BoundBetweenExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundAggregateExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_CASE:
-		result = VisitReplace((BoundCaseExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundCaseExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_CAST:
-		result = VisitReplace((BoundCastExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundCastExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_COLUMN_REF:
-		result = VisitReplace((BoundColumnRefExpression &)expr, expression);
-		break;
-	case ExpressionClass::BOUND_COMPARISON:
-		result = VisitReplace((BoundComparisonExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundColumnRefExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_CONJUNCTION:
-		result = VisitReplace((BoundConjunctionExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundConjunctionExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_CONSTANT:
-		result = VisitReplace((BoundConstantExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundConstantExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_FUNCTION:
-		result = VisitReplace((BoundFunctionExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundFunctionExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_SUBQUERY:
-		result = VisitReplace((BoundSubqueryExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundSubqueryExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_OPERATOR:
-		result = VisitReplace((BoundOperatorExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundOperatorExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_PARAMETER:
-		result = VisitReplace((BoundParameterExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundParameterExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_REF:
-		result = VisitReplace((BoundReferenceExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundReferenceExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_DEFAULT:
-		result = VisitReplace((BoundDefaultExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundDefaultExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_WINDOW:
-		result = VisitReplace((BoundWindowExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundWindowExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_UNNEST:
-		result = VisitReplace((BoundUnnestExpression &)expr, expression);
+		result = VisitReplace(expr.Cast<BoundUnnestExpression>(), expression);
 		break;
 	default:
 		throw InternalException("Unrecognized expression type in logical operator visitor");
 	}
 	if (result) {
-		*expression = move(result);
+		*expression = std::move(result);
 	} else {
 		// visit the children of this node
 		VisitExpressionChildren(expr);
@@ -176,15 +289,10 @@ void LogicalOperatorVisitor::VisitExpressionChildren(Expression &expr) {
 	ExpressionIterator::EnumerateChildren(expr, [&](unique_ptr<Expression> &expr) { VisitExpression(&expr); });
 }
 
-// these are all default methods that can be overriden
+// these are all default methods that can be overridden
 // we don't care about coverage here
 // LCOV_EXCL_START
 unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundAggregateExpression &expr,
-                                                            unique_ptr<Expression> *expr_ptr) {
-	return nullptr;
-}
-
-unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundBetweenExpression &expr,
                                                             unique_ptr<Expression> *expr_ptr) {
 	return nullptr;
 }
@@ -200,11 +308,6 @@ unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundCastExpression 
 }
 
 unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundColumnRefExpression &expr,
-                                                            unique_ptr<Expression> *expr_ptr) {
-	return nullptr;
-}
-
-unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundComparisonExpression &expr,
                                                             unique_ptr<Expression> *expr_ptr) {
 	return nullptr;
 }

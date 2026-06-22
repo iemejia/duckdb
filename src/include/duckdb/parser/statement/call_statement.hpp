@@ -10,11 +10,13 @@
 
 #include "duckdb/parser/parsed_expression.hpp"
 #include "duckdb/parser/sql_statement.hpp"
-#include "duckdb/common/vector.hpp"
 
 namespace duckdb {
 
 class CallStatement : public SQLStatement {
+public:
+	static constexpr const StatementType TYPE = StatementType::CALL_STATEMENT;
+
 public:
 	CallStatement();
 
@@ -25,5 +27,6 @@ protected:
 
 public:
 	unique_ptr<SQLStatement> Copy() const override;
+	string ToString() const override;
 };
 } // namespace duckdb

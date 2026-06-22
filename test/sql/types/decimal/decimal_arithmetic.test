@@ -2,9 +2,6 @@
 # description: Test basic decimals
 # group: [decimal]
 
-statement ok
-PRAGMA enable_verification
-
 # negate
 query II
 SELECT -('0.1'::DECIMAL), -('-0.1'::DECIMAL)
@@ -60,6 +57,8 @@ SELECT ('0.5'::DECIMAL(1,1) + 10000)::VARCHAR,
 # out of range
 statement error
 SELECT ('0.54321543215432154321543215432154321'::DECIMAL(35,35) + 10000)::VARCHAR
+----
+<REGEX>:Conversion Error.*Could not cast value.*
 
 # different types
 query IIIII
@@ -177,6 +176,8 @@ SELECT '0.001'::DECIMAL * 100::TINYINT,
 # multiplication could not be performed exactly: throw error
 statement error
 SELECT '0.000000000000000000000000000001'::DECIMAL(38,30) * '0.000000000000000000000000000001'::DECIMAL(38,30)
+----
+<REGEX>:Out of Range Error.*Needed scale.*
 
 # test addition, subtraction and multiplication with various scales and precisions
 query IIII

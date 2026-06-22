@@ -16,12 +16,16 @@ namespace duckdb {
 //! PhysicalStreamingSample represents a streaming sample using either system or bernoulli sampling
 class PhysicalStreamingSample : public PhysicalOperator {
 public:
-	PhysicalStreamingSample(vector<LogicalType> types, SampleMethod method, double percentage, int64_t seed,
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::STREAMING_SAMPLE;
+
+public:
+	PhysicalStreamingSample(PhysicalPlan &physical_plan, vector<LogicalType> types, unique_ptr<SampleOptions> options,
 	                        idx_t estimated_cardinality);
 
-	SampleMethod method;
+	unique_ptr<SampleOptions> sample_options;
 	double percentage;
-	int64_t seed;
+	double system_sample_phase;
+	idx_t rows;
 
 public:
 	// Operator interface
@@ -29,14 +33,13 @@ public:
 	OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                           GlobalOperatorState &gstate, OperatorState &state) const override;
 
-	bool ParallelOperator() const override {
-		return true;
-	}
+	bool ParallelOperator() const override;
 
-	string ParamsToString() const override;
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
 private:
-	void SystemSample(DataChunk &input, DataChunk &result, OperatorState &state) const;
+	void SystemSamplePercent(DataChunk &input, DataChunk &result, OperatorState &state) const;
+	void SystemSampleRows(DataChunk &input, DataChunk &result, OperatorState &state) const;
 	void BernoulliSample(DataChunk &input, DataChunk &result, OperatorState &state) const;
 };
 

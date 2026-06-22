@@ -12,11 +12,13 @@ add_library_unity(
   default_expression.cpp
   function_expression.cpp
   lambda_expression.cpp
+  lambdaref_expression.cpp
   operator_expression.cpp
   parameter_expression.cpp
   positional_reference_expression.cpp
   star_expression.cpp
   subquery_expression.cpp
+  type_expression.cpp
   window_expression.cpp)
 set(ALL_OBJECT_FILES
     ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:duckdb_expression>

@@ -8,19 +8,18 @@
 #include <string>
 
 using namespace duckdb;
-using namespace std;
 
 constexpr const char *QUERY_DIRECTORY = "test/ossfuzz/cases";
 
 static void test_runner() {
-	unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
+	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
 	auto file_name = Catch::getResultCapture().getCurrentTestName();
 
-	unique_ptr<QueryResult> result;
+	duckdb::unique_ptr<QueryResult> result;
 	DuckDB db(nullptr);
 	Connection con(db);
 	std::ifstream t(file_name);
-	std::stringstream buffer;
+	duckdb::stringstream buffer;
 	buffer << t.rdbuf();
 	auto query = buffer.str();
 	result = con.Query(query.c_str());
@@ -29,7 +28,7 @@ static void test_runner() {
 	if (result->HasError()) {
 		if (TestIsInternalError(internal_error_messages, result->GetError())) {
 			result->Print();
-			REQUIRE(!result->GetErrorObject());
+			REQUIRE(!result->GetErrorObject().HasError());
 		}
 	}
 
@@ -40,8 +39,8 @@ static void test_runner() {
 
 struct RegisterOssfuzzTests {
 	RegisterOssfuzzTests() {
-		// register a separate test for each file in the QUERY_DIRECTORY
-		unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
+		// Register a separate test for each file in the QUERY_DIRECTORY.
+		duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
 		fs->ListFiles(QUERY_DIRECTORY, [&](string path, bool) {
 			REGISTER_TEST_CASE(test_runner, string(QUERY_DIRECTORY) + "/" + path, "[ossfuzz][.]");
 		});

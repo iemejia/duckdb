@@ -2,6 +2,9 @@
 # description: Test update behavior with multiple updaters
 # group: [update]
 
+statement ok
+SET immediate_transaction_mode=true
+
 # this test contains four query connections (con1, con2, con3, con4)
 # and one updating connection (updater)
 # first create a table, filled with 3 values (1), (2), (3)
@@ -70,12 +73,15 @@ SELECT * FROM test ORDER BY a
 # now verify that we get conflicts when we update values that have been updated AFTER we started
 statement error con1
 UPDATE test SET a=99 WHERE a=1
+----
 
 statement error con2
 UPDATE test SET a=99 WHERE a=2
+----
 
 statement error con3
 UPDATE test SET a=99 WHERE a=3
+----
 
 # revert to previous state
 statement ok updater

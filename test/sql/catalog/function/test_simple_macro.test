@@ -3,9 +3,6 @@
 # group: [function]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE integers (a INT)
 
 statement ok
@@ -21,9 +18,13 @@ SELECT one()
 
 statement error
 SELECT one(1)
+----
+does not support the supplied arguments
 
 statement error
 SELECT one(NULL)
+----
+does not support the supplied arguments
 
 statement ok
 DROP MACRO one;
@@ -95,6 +96,8 @@ DROP FUNCTION two;
 # b cannot be found
 statement error
 CREATE MACRO add_macro(a) AS a + b
+----
+column "b" was not found because the FROM clause is missing
 
 statement ok
 CREATE MACRO add_macro(a, b) AS a + b
@@ -115,9 +118,14 @@ SELECT add_macro(a,2) + add_macro(3,b) FROM integers, floats
 ----
 6.5
 
-# cannot create function with same name as a ScalarFunction
-statement error
+# can create function with same name as a ScalarFunction
+statement ok
 CREATE MACRO string_split(a,b) AS a + b
+
+query I
+SELECT string_split(1, 2)
+----
+3
 
 statement ok
 CREATE MACRO IFELSE(a,b,c) AS CASE WHEN a THEN b ELSE c END
@@ -150,25 +158,37 @@ false
 # incorrect number of arguments
 statement error
 SELECT IFELSE();
+----
+does not support the supplied arguments
 
 statement error
 SELECT IFELSE(1);
+----
+does not support the supplied arguments
 
 statement error
 SELECT IFELSE(1, 2);
+----
+does not support the supplied arguments
 
 statement error
 SELECT IFELSE(1, 2, 3, 4);
+----
+does not support the supplied arguments
 
 # no duplicate macro function names
 statement error
 CREATE MACRO IFELSE(a,b) AS a+b
+----
+already exists
 
 statement error
 CREATE MACRO ifelse(a,b) AS a+b
+----
+already exists
 
 query T
-SELECT IFELSE(1, 'random', RANDOM())
+SELECT IFELSE('1', 'random', RANDOM()::VARCHAR)
 ----
 random
 
@@ -187,6 +207,7 @@ SELECT macros.add_macro(40,2)
 # conflicting parameter names in macro definition
 statement error
 CREATE MACRO conflict(i, i) AS i + 1
+----
 
 # aggregation macro's
 statement ok
@@ -210,16 +231,20 @@ SELECT weird_avg(a) FROM integers
 
 statement error
 CREATE MACRO star() AS *
+----
 
 # macro's with default arguments
 statement error
 CREATE MACRO conflict(a, a := 1) AS a + a
+----
 
 statement ok
 CREATE MACRO add_default5(a, b := 5) AS a + b
 
-statement error
+query I
 SELECT add_default5(3, 6)
+----
+9
 
 query T
 SELECT add_default5(3)
@@ -233,23 +258,45 @@ SELECT add_default5(3, b := 6)
 
 statement error
 SELECT add_default5(b := 6, 3)
+----
+positional argument following named argument
 
 statement error
-CREATE MACRO wrong_order(a, b := 3, c)
+CREATE MACRO wrong_order(a, b := 3, c) AS a + b + c
+----
+Parameter without a default follows parameter with a default
 
 statement error
-CREATE MACRO wrong_order(a := 3, b)
+CREATE MACRO wrong_order(a := 3, b) AS a + b
+----
+Parameter without a default follows parameter with a default
 
 # only constant default values are allowed
 statement error
 CREATE MACRO select_plus_floats(a, f := b) AS (SELECT a + f FROM floats)
+----
+Binder Error: Default value for parameter 'f' cannot contain column names
 
-# +(FLOAT, VARCHAR) does not work - constant types are checked at create time
+# +(FLOAT, VARCHAR) does not work - but types are only checked once the macro is called
+statement ok
+CREATE MACRO wrong_type(s := 'not a float') AS (SELECT b + s FROM floats)
+
+# this should fail
 statement error
-CREATE MACRO wrong_type(s='not a float') AS (SELECT b + s FROM floats)
+select wrong_type()
+----
+Could not convert
+
+# but succeed if we pass the correct type
+query I
+select wrong_type(42)
+----
+42.5
 
 statement error
 CREATE MACRO two_default_params(a := 4, a := 2) AS a + a
+----
+Duplicate parameter
 
 statement ok
 CREATE MACRO two_default_params(a := 4, b := 2) AS a + b
@@ -271,24 +318,59 @@ SELECT two_default_params(b := 3)
 
 statement error
 SELECT two_default_params(a := 5, a := 3)
+----
+has named argument repeated
 
 statement error
 SELECT two_default_params(b := 5, b := 3)
+----
+has named argument repeated
 
 statement error
 CREATE MACRO macros.add_macro(a, b) AS a + b
+----
+already exists
 
 statement error
 CREATE MACRO my_macro(a.b) AS 42;
+----
+syntax error
 
 statement error
 CREATE MACRO my_macro(a.b.c) AS 42;
+----
+syntax error
 
 statement ok
 CREATE MACRO my_macro(a) AS 42;
 
 statement error
 SELECT my_macro(x := 42);
+----
+does not support the supplied arguments
 
 statement error
 SELECT my_macro(a := 42, a := 42);
+----
+has named argument repeated
+
+# internal issue 1044
+statement ok
+create macro zz1(x) as (select 10+x);
+
+statement ok
+create macro zz2(x) as 20+x;
+
+query II
+select zz1(1),zz2(2);
+----
+11	22
+
+# should not return any results (because we shouldn't display "macro_parameters"
+query III
+select function_name, parameters, macro_definition
+from duckdb_functions()
+where function_name like 'zz%'
+and macro_definition like '%macro_parameters%';
+----
+

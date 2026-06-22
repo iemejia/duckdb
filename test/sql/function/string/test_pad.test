@@ -2,9 +2,6 @@
 # description: LPAD/RPAD test
 # group: [string]
 
-statement ok
-PRAGMA enable_verification
-
 # test lpad on NULLs
 query TTTTTTT
 select LPAD(NULL, 7, '-'), LPAD('Base', NULL, '-'), LPAD('Base', 7, NULL), LPAD(NULL, NULL, '-'), LPAD(NULL, 7, NULL), LPAD('Base', NULL, NULL), LPAD(NULL, NULL, NULL)
@@ -72,31 +69,41 @@ RÄcMotörHead	MotörHeadRÄc	MOTÖRHEAD	motörhead
 # test incorrect usage
 statement error
 select LPAD()
+----
 
 statement error
 select LPAD(1)
+----
 
 statement error
 select LPAD(1, 2)
+----
 
 statement error
 select LPAD('Hello', 10, '')
+----
 
 statement error
 select LPAD('a', 100000000000000000, 0)
+----
 
 statement error
 select RPAD()
+----
 
 statement error
 select RPAD(1)
+----
 
 statement error
 select RPAD(1, 2)
+----
 
 statement error
 select RPAD('Hello', 10, '')
+----
 
 statement error
 select RPAD('a', 100000000000000000, 0)
+----
 

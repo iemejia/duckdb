@@ -8,15 +8,15 @@
 
 #pragma once
 
-#include "duckdb/common/common.hpp"
+#include "duckdb/common/constants.hpp"
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/common/exception.hpp"
 
 namespace duckdb {
 
 class Serializer;
 class Deserializer;
-class FieldWriter;
-class FieldReader;
 
 //===--------------------------------------------------------------------===//
 // Constraint Types
@@ -32,19 +32,28 @@ enum class ConstraintType : uint8_t {
 enum class ForeignKeyType : uint8_t {
 	FK_TYPE_PRIMARY_KEY_TABLE = 0,   // main table
 	FK_TYPE_FOREIGN_KEY_TABLE = 1,   // referencing table
-	FK_TYPE_SELF_REFERENCE_TABLE = 2 // self refrencing table
+	FK_TYPE_SELF_REFERENCE_TABLE = 2 // self referencing table
 };
 
 struct ForeignKeyInfo {
 	ForeignKeyType type;
-	string schema;
+	Identifier schema;
 	//! if type is FK_TYPE_FOREIGN_KEY_TABLE, means main key table, if type is FK_TYPE_PRIMARY_KEY_TABLE, means foreign
 	//! key table
-	string table;
+	Identifier table;
 	//! The set of main key table's column's index
 	vector<PhysicalIndex> pk_keys;
 	//! The set of foreign key table's column's index
 	vector<PhysicalIndex> fk_keys;
+
+	bool IsDeleteConstraint() const {
+		return type == ForeignKeyType::FK_TYPE_PRIMARY_KEY_TABLE ||
+		       type == ForeignKeyType::FK_TYPE_SELF_REFERENCE_TABLE;
+	}
+	bool IsAppendConstraint() const {
+		return type == ForeignKeyType::FK_TYPE_FOREIGN_KEY_TABLE ||
+		       type == ForeignKeyType::FK_TYPE_SELF_REFERENCE_TABLE;
+	}
 };
 
 //! Constraint is the base class of any type of table constraint.
@@ -60,11 +69,25 @@ public:
 	DUCKDB_API void Print() const;
 
 	DUCKDB_API virtual unique_ptr<Constraint> Copy() const = 0;
-	//! Serializes a Constraint to a stand-alone binary blob
-	DUCKDB_API void Serialize(Serializer &serializer) const;
-	//! Serializes a Constraint to a stand-alone binary blob
-	DUCKDB_API virtual void Serialize(FieldWriter &writer) const = 0;
-	//! Deserializes a blob back into a Constraint
-	DUCKDB_API static unique_ptr<Constraint> Deserialize(Deserializer &source);
+
+	DUCKDB_API virtual void Serialize(Serializer &serializer) const;
+	DUCKDB_API static unique_ptr<Constraint> Deserialize(Deserializer &deserializer);
+
+public:
+	template <class TARGET>
+	TARGET &Cast() {
+		if (type != TARGET::TYPE) {
+			throw InternalException("Failed to cast constraint to type - constraint type mismatch");
+		}
+		return reinterpret_cast<TARGET &>(*this);
+	}
+
+	template <class TARGET>
+	const TARGET &Cast() const {
+		if (type != TARGET::TYPE) {
+			throw InternalException("Failed to cast constraint to type - constraint type mismatch");
+		}
+		return reinterpret_cast<const TARGET &>(*this);
+	}
 };
 } // namespace duckdb

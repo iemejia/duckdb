@@ -19,6 +19,9 @@ namespace duckdb {
 //! every row in a table
 class BoundCheckConstraint : public BoundConstraint {
 public:
+	static constexpr const ConstraintType TYPE = ConstraintType::CHECK;
+
+public:
 	BoundCheckConstraint() : BoundConstraint(ConstraintType::CHECK) {
 	}
 
@@ -26,6 +29,14 @@ public:
 	unique_ptr<Expression> expression;
 	//! The columns used by the CHECK constraint
 	physical_index_set_t bound_columns;
+
+public:
+	unique_ptr<BoundConstraint> Copy() const override {
+		auto result = make_uniq<BoundCheckConstraint>();
+		result->expression = expression->Copy();
+		result->bound_columns = bound_columns;
+		return std::move(result);
+	}
 };
 
 } // namespace duckdb

@@ -18,12 +18,15 @@
 
 namespace duckdb {
 
-//! PhysicalUngroupedAggregate is an aggregate operator that can only perform aggregates (1) without any groups, (2)
-//! without any DISTINCT aggregates, and (3) when all aggregates are combineable
+//! PhysicalUngroupedAggregate is an aggregate operator that can only perform aggregates without any groups
 class PhysicalUngroupedAggregate : public PhysicalOperator {
 public:
-	PhysicalUngroupedAggregate(vector<LogicalType> types, vector<unique_ptr<Expression>> expressions,
-	                           idx_t estimated_cardinality);
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::UNGROUPED_AGGREGATE;
+
+public:
+	PhysicalUngroupedAggregate(PhysicalPlan &physical_plan, vector<LogicalType> types,
+	                           vector<unique_ptr<Expression>> expressions, idx_t estimated_cardinality,
+	                           TupleDataValidityType distinct_validity);
 
 	//! The aggregates that have to be computed
 	vector<unique_ptr<Expression>> aggregates;
@@ -32,22 +35,24 @@ public:
 
 public:
 	// Source interface
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	void GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-	             LocalSourceState &lstate) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
+
+	bool IsSource() const override {
+		return true;
+	}
 
 public:
 	// Sink interface
-	SinkResultType Sink(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate,
-	                    DataChunk &input) const override;
-	void Combine(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate) const override;
+	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
+	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
-	                          GlobalSinkState &gstate) const override;
+	                          OperatorSinkFinalizeInput &input) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 
-	string ParamsToString() const override;
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
 	bool IsSink() const override {
 		return true;
@@ -57,15 +62,16 @@ public:
 		return true;
 	}
 
+	bool SinkOrderDependent() const override;
+
 private:
 	//! Finalize the distinct aggregates
 	SinkFinalizeType FinalizeDistinct(Pipeline &pipeline, Event &event, ClientContext &context,
 	                                  GlobalSinkState &gstate) const;
 	//! Combine the distinct aggregates
-	void CombineDistinct(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate) const;
+	void CombineDistinct(ExecutionContext &context, OperatorSinkCombineInput &input) const;
 	//! Sink the distinct aggregates
-	void SinkDistinct(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate,
-	                  DataChunk &input) const;
+	void SinkDistinct(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const;
 };
 
 } // namespace duckdb

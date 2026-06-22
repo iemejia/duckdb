@@ -2,23 +2,24 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_unnest_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/execution/operator/projection/physical_unnest.hpp"
 
 namespace duckdb {
 
 struct UnnestBindData : public FunctionData {
-	explicit UnnestBindData(LogicalType input_type_p) : input_type(move(input_type_p)) {
+	explicit UnnestBindData(LogicalType input_type_p) : input_type(std::move(input_type_p)) {
 	}
 
 	LogicalType input_type;
 
 public:
 	unique_ptr<FunctionData> Copy() const override {
-		return make_unique<UnnestBindData>(input_type);
+		return make_uniq<UnnestBindData>(input_type);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
-		auto &other = (const UnnestBindData &)other_p;
+		auto &other = other_p.Cast<UnnestBindData>();
 		return input_type == other.input_type;
 	}
 };
@@ -43,43 +44,55 @@ struct UnnestLocalState : public LocalTableFunctionState {
 
 static unique_ptr<FunctionData> UnnestBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
-	if (input.input_table_types.size() != 1 || input.input_table_types[0].id() != LogicalTypeId::LIST) {
-		throw BinderException("UNNEST requires a single list as input");
+	if (input.input_table_types.size() != 1 || (input.input_table_types[0].id() != LogicalTypeId::LIST &&
+	                                            input.input_table_types[0].id() != LogicalTypeId::ARRAY)) {
+		throw BinderException("UNNEST requires a single list or array as input");
 	}
-	return_types.push_back(ListType::GetChildType(input.input_table_types[0]));
-	names.push_back(input.input_table_names[0]);
-	return make_unique<UnnestBindData>(input.input_table_types[0]);
+	auto &input_type = input.input_table_types[0];
+	if (input_type.id() == LogicalTypeId::LIST) {
+		return_types.push_back(ListType::GetChildType(input_type));
+	} else {
+		return_types.push_back(ArrayType::GetChildType(input_type));
+	}
+	names.push_back("unnest");
+	return make_uniq<UnnestBindData>(input_type);
 }
 
 static unique_ptr<LocalTableFunctionState> UnnestLocalInit(ExecutionContext &context, TableFunctionInitInput &input,
                                                            GlobalTableFunctionState *global_state) {
-	auto &gstate = (UnnestGlobalState &)*global_state;
+	auto &gstate = global_state->Cast<UnnestGlobalState>();
 
-	auto result = make_unique<UnnestLocalState>();
+	auto result = make_uniq<UnnestLocalState>();
 	result->operator_state = PhysicalUnnest::GetState(context, gstate.select_list);
-	return move(result);
+	return std::move(result);
 }
 
 static unique_ptr<GlobalTableFunctionState> UnnestInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto &bind_data = (UnnestBindData &)*input.bind_data;
-	auto result = make_unique<UnnestGlobalState>();
-	auto ref = make_unique<BoundReferenceExpression>(bind_data.input_type, 0);
-	auto bound_unnest = make_unique<BoundUnnestExpression>(ListType::GetChildType(bind_data.input_type));
-	bound_unnest->child = move(ref);
-	result->select_list.push_back(move(bound_unnest));
-	return move(result);
+	auto &bind_data = input.bind_data->Cast<UnnestBindData>();
+	auto result = make_uniq<UnnestGlobalState>();
+
+	unique_ptr<Expression> child = make_uniq<BoundReferenceExpression>(bind_data.input_type, 0U);
+	if (child->GetReturnType().id() == LogicalTypeId::ARRAY) {
+		child = BoundCastExpression::AddArrayCastToList(context, std::move(child));
+	}
+
+	auto bound_unnest = make_uniq<BoundUnnestExpression>(ListType::GetChildType(child->GetReturnType()));
+	bound_unnest->ChildMutable() = std::move(child);
+	result->select_list.push_back(std::move(bound_unnest));
+	return std::move(result);
 }
 
 static OperatorResultType UnnestFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
                                          DataChunk &output) {
-	auto &state = (UnnestGlobalState &)*data_p.global_state;
-	auto &lstate = (UnnestLocalState &)*data_p.local_state;
+	auto &state = data_p.global_state->Cast<UnnestGlobalState>();
+	auto &lstate = data_p.local_state->Cast<UnnestLocalState>();
 	return PhysicalUnnest::ExecuteInternal(context, input, output, *lstate.operator_state, state.select_list, false);
 }
 
 void UnnestTableFunction::RegisterFunction(BuiltinFunctions &set) {
-	TableFunction unnest_function("unnest", {LogicalTypeId::TABLE}, nullptr, UnnestBind, UnnestInit, UnnestLocalInit);
+	TableFunction unnest_function("unnest", {LogicalType::ANY}, nullptr, UnnestBind, UnnestInit, UnnestLocalInit);
 	unnest_function.in_out_function = UnnestFunction;
+	unnest_function.return_type = TableFunctionReturnType::SET_RETURNING_FUNCTION;
 	set.AddFunction(unnest_function);
 }
 

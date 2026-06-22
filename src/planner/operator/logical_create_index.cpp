@@ -6,44 +6,41 @@
 
 namespace duckdb {
 
-void LogicalCreateIndex::Serialize(FieldWriter &writer) const {
+LogicalCreateIndex::LogicalCreateIndex(unique_ptr<CreateIndexInfo> info_p, vector<unique_ptr<Expression>> expressions_p,
+                                       TableCatalogEntry &table_p, unique_ptr<AlterTableInfo> alter_table_info)
+    : LogicalOperator(LogicalOperatorType::LOGICAL_CREATE_INDEX), info(std::move(info_p)), table(table_p),
+      alter_table_info(std::move(alter_table_info)) {
+	for (auto &expr : expressions_p) {
+		unbound_expressions.push_back(expr->Copy());
+	}
+	expressions = std::move(expressions_p);
 
-	writer.WriteOptional(info);
-	table.Serialize(writer.GetSerializer());
-	FunctionSerializer::SerializeBase<TableFunction>(writer, function, bind_data.get());
-	writer.WriteSerializableList(unbound_expressions);
-
-	writer.Finalize();
+	if (info->column_ids.empty()) {
+		throw BinderException("CREATE INDEX does not refer to any columns in the base table!");
+	}
 }
 
-unique_ptr<LogicalOperator> LogicalCreateIndex::Deserialize(LogicalDeserializationState &state, FieldReader &reader) {
-
-	auto &context = state.gstate.context;
-	auto catalog_info = TableCatalogEntry::Deserialize(reader.GetSource(), context);
-	auto &catalog = Catalog::GetCatalog(context);
-	TableCatalogEntry *table = catalog.GetEntry<TableCatalogEntry>(context, catalog_info->schema, catalog_info->table);
-
-	auto unbound_expressions = reader.ReadRequiredSerializableList<Expression>(state.gstate);
-
-	auto create_info = reader.ReadOptional<CreateInfo>(nullptr);
-	if (create_info->type != CatalogType::INDEX_ENTRY) {
-		throw InternalException("Unexpected type: '%s', expected '%s'", CatalogTypeToString(create_info->type),
-		                        CatalogTypeToString(CatalogType::INDEX_ENTRY));
+LogicalCreateIndex::LogicalCreateIndex(ClientContext &context, unique_ptr<CreateInfo> info_p,
+                                       vector<unique_ptr<Expression>> expressions_p,
+                                       unique_ptr<ParseInfo> alter_table_info)
+    : LogicalOperator(LogicalOperatorType::LOGICAL_CREATE_INDEX),
+      info(unique_ptr_cast<CreateInfo, CreateIndexInfo>(std::move(info_p))), table(BindTable(context, *info)),
+      alter_table_info(unique_ptr_cast<ParseInfo, AlterTableInfo>(std::move(alter_table_info))) {
+	for (auto &expr : expressions_p) {
+		unbound_expressions.push_back(expr->Copy());
 	}
+	expressions = std::move(expressions_p);
+}
 
-	CreateInfo *raw_create_info_ptr = create_info.release();
-	CreateIndexInfo *raw_create_index_info_ptr = static_cast<CreateIndexInfo *>(raw_create_info_ptr);
-	unique_ptr<CreateIndexInfo> uptr_create_index_info = unique_ptr<CreateIndexInfo> {raw_create_index_info_ptr};
-	auto info = unique_ptr<CreateIndexInfo> {static_cast<CreateIndexInfo *>(create_info.release())};
+void LogicalCreateIndex::ResolveTypes() {
+	types.emplace_back(LogicalType::BIGINT);
+}
 
-	unique_ptr<FunctionData> bind_data;
-	bool has_deserialize;
-	auto function = FunctionSerializer::DeserializeBaseInternal<TableFunction, TableFunctionCatalogEntry>(
-	    reader, state.gstate, CatalogType::TABLE_FUNCTION_ENTRY, bind_data, has_deserialize);
-
-	reader.Finalize();
-	return make_unique<LogicalCreateIndex>(move(bind_data), move(info), move(unbound_expressions), *table,
-	                                       move(function));
+TableCatalogEntry &LogicalCreateIndex::BindTable(ClientContext &context, CreateIndexInfo &info_p) {
+	auto &catalog = info_p.catalog;
+	auto &schema = info_p.schema;
+	auto &table_name = info_p.table;
+	return Catalog::GetEntry<TableCatalogEntry>(context, catalog, schema, table_name);
 }
 
 } // namespace duckdb

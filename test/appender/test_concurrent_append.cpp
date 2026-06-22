@@ -7,7 +7,6 @@
 #include <vector>
 
 using namespace duckdb;
-using namespace std;
 
 atomic<int> finished_threads;
 
@@ -30,7 +29,7 @@ static void append_to_integers(DuckDB *db, size_t threadnr) {
 }
 
 TEST_CASE("Test concurrent appends", "[appender][.]") {
-	unique_ptr<QueryResult> result;
+	duckdb::unique_ptr<QueryResult> result;
 	DBConfig config;
 	config.options.maximum_threads = 1;
 	DuckDB db(nullptr, &config);
@@ -41,9 +40,9 @@ TEST_CASE("Test concurrent appends", "[appender][.]") {
 
 	finished_threads = 0;
 
-	thread threads[THREAD_COUNT];
+	std::thread threads[THREAD_COUNT];
 	for (size_t i = 0; i < THREAD_COUNT; i++) {
-		threads[i] = thread(append_to_integers, &db, i);
+		threads[i] = std::thread(append_to_integers, &db, i);
 	}
 
 	for (size_t i = 0; i < THREAD_COUNT; i++) {

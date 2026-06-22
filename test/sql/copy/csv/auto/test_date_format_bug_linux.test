@@ -2,9 +2,8 @@
 # group: [auto]
 
 query I
-SELECT *  FROM read_csv_auto('test/sql/copy/csv/data/auto/date_format_bug_linux.csv')
+SELECT *  FROM read_csv_auto('{DATA_DIR}/csv/auto/date_format_bug_linux.csv')
 ----
-test
 8cb123cb8
 34fd321
 fg5391jn4

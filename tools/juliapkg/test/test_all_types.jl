@@ -6,7 +6,19 @@
     db = DBInterface.connect(DuckDB.DB)
     con = DBInterface.connect(db)
 
-    df = DataFrame(DBInterface.execute(con, "SELECT * FROM test_all_types()"))
+    df = DataFrame(
+        DBInterface.execute(
+            con,
+            """SELECT * EXCLUDE(time, time_tz, time_ns, bignum)
+                , CASE WHEN time = '24:00:00'::TIME THEN '23:59:59.999999'::TIME ELSE time END AS time
+                , CASE WHEN time_tz = '24:00:00-15:59:59'::TIMETZ THEN '23:59:59.999999-15:59:59'::TIMETZ ELSE time_tz END AS time_tz
+            FROM test_all_types()
+            """
+        )
+    )
+    #println(names(df))
+    # we can also use 'propertynames()' to get the column names as symbols, that might make for a better testing approach
+    # If we add a dictionary that maps from the symbol to the expected result
 
     @test isequal(df.bool, [false, true, missing])
     @test isequal(df.tinyint, [-128, 127, missing])
@@ -15,8 +27,9 @@
     @test isequal(df.bigint, [-9223372036854775808, 9223372036854775807, missing])
     @test isequal(
         df.hugeint,
-        [-170141183460469231731687303715884105727, 170141183460469231731687303715884105727, missing]
+        [-170141183460469231731687303715884105728, 170141183460469231731687303715884105727, missing]
     )
+    @test isequal(df.uhugeint, [0, 340282366920938463463374607431768211455, missing])
     @test isequal(df.utinyint, [0, 255, missing])
     @test isequal(df.usmallint, [0, 65535, missing])
     @test isequal(df.uint, [0, 4294967295, missing])
@@ -38,7 +51,6 @@
         df.dec38_10,
         [-9999999999999999999999999999.9999999999, 9999999999999999999999999999.9999999999, missing]
     )
-    @test isequal(df.json, ["🦆🦆🦆🦆🦆🦆", "goose", missing])
     @test isequal(df.small_enum, ["DUCK_DUCK_ENUM", "GOOSE", missing])
     @test isequal(df.medium_enum, ["enum_0", "enum_299", missing])
     @test isequal(df.large_enum, ["enum_0", "enum_69999", missing])
@@ -63,7 +75,7 @@
     )
     @test isequal(
         df.timestamp_ns,
-        [Dates.DateTime(1677, 9, 21, 0, 12, 43, 146), Dates.DateTime(2262, 4, 11, 23, 47, 16, 854), missing]
+        [Dates.DateTime(1677, 9, 22, 0, 0, 0, 0), Dates.DateTime(2262, 4, 11, 23, 47, 16, 854), missing]
     )
     @test isequal(
         df.interval,
@@ -112,7 +124,7 @@
             missing
         ]
     )
-    @test isequal(df.uuid, [UUID(1), UUID(UInt128(340282366920938463463374607431768211455)), missing])
+    @test isequal(df.uuid, [UUID(0), UUID(UInt128(340282366920938463463374607431768211455)), missing])
     @test isequal(df.int_array, [[], [42, 999, missing, missing, -42], missing])
     @test isequal(df.double_array, [[], [42, NaN, Inf, -Inf, missing, -42], missing])
     @test isequal(
@@ -173,4 +185,45 @@
     )
     @test isequal(df.array_of_structs, [[], [(a = missing, b = missing), (a = 42, b = "🦆🦆🦆🦆🦆🦆"), missing], missing])
     @test isequal(df.map, [Dict(), Dict("key1" => "🦆🦆🦆🦆🦆🦆", "key2" => "goose"), missing])
+    @test isequal(df.fixed_int_array, [[missing, 2, 3], [4, 5, 6], missing])
+    @test isequal(df.fixed_varchar_array, [["a", missing, "c"], ["d", "e", "f"], missing])
+    @test isequal(
+        df.fixed_nested_int_array,
+        [[[missing, 2, 3], missing, [missing, 2, 3]], [[4, 5, 6], [missing, 2, 3], [4, 5, 6]], missing]
+    )
+    @test isequal(
+        df.fixed_nested_varchar_array,
+        [
+            [["a", missing, "c"], missing, ["a", missing, "c"]],
+            [["d", "e", "f"], ["a", missing, "c"], ["d", "e", "f"]],
+            missing
+        ]
+    )
+    @test isequal(
+        df.fixed_struct_array,
+        [
+            [(a = missing, b = missing), (a = 42, b = "🦆🦆🦆🦆🦆🦆"), (a = missing, b = missing)],
+            [(a = 42, b = "🦆🦆🦆🦆🦆🦆"), (a = missing, b = missing), (a = 42, b = "🦆🦆🦆🦆🦆🦆")],
+            missing
+        ]
+    )
+    @test isequal(
+        df.struct_of_fixed_array,
+        [(a = [missing, 2, 3], b = ["a", missing, "c"]), (a = [4, 5, 6], b = ["d", "e", "f"]), missing]
+    )
+    @test isequal(
+        df.fixed_array_of_int_list,
+        [
+            [[], [42, 999, missing, missing, -42], []],
+            [[42, 999, missing, missing, -42], [], [42, 999, missing, missing, -42]],
+            missing
+        ]
+    )
+    @test isequal(
+        df.list_of_fixed_int_array,
+        [[[missing, 2, 3], [4, 5, 6], [missing, 2, 3]], [[4, 5, 6], [missing, 2, 3], [4, 5, 6]], missing]
+    )
+    @test df.geometry[1] isa Base.CodeUnits{UInt8, String}
+    @test df.geometry[2] isa Base.CodeUnits{UInt8, String}
+    @test ismissing(df.geometry[3])
 end

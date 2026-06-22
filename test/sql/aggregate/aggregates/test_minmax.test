@@ -1,9 +1,9 @@
 # name: test/sql/aggregate/aggregates/test_minmax.test
-# description: Test MEDIAN aggregate
+# description: Test min/max aggregate
 # group: [aggregates]
 
 statement ok
-PRAGMA enable_verification
+SET debug_force_external=true;
 
 # List slicing
 statement ok

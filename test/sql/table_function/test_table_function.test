@@ -3,9 +3,6 @@
 # group: [table_function]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE integers(i INTEGER, j INTEGER);
 
 # SELECT * from table function
@@ -25,6 +22,7 @@ j
 # project column that is not in function return
 statement error
 SELECT blablabla FROM pragma_table_info('integers');
+----
 
 # join with table function
 statement ok

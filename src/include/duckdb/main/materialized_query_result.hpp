@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "duckdb/common/types/column_data_collection.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/main/query_result.hpp"
 
@@ -18,21 +18,21 @@ class ClientContext;
 
 class MaterializedQueryResult : public QueryResult {
 public:
+	static constexpr const QueryResultType TYPE = QueryResultType::MATERIALIZED_RESULT;
+
+public:
 	friend class ClientContext;
 	//! Creates a successful query result with the specified names and types
 	DUCKDB_API MaterializedQueryResult(StatementType statement_type, StatementProperties properties,
 	                                   vector<string> names, unique_ptr<ColumnDataCollection> collection,
 	                                   ClientProperties client_properties);
 	//! Creates an unsuccessful query result with error condition
-	DUCKDB_API explicit MaterializedQueryResult(PreservedError error);
+	DUCKDB_API explicit MaterializedQueryResult(ErrorData error);
 
 public:
-	//! Fetches a DataChunk from the query result.
-	//! This will consume the result (i.e. the result can only be scanned once with this function)
-	DUCKDB_API unique_ptr<DataChunk> Fetch() override;
-	DUCKDB_API unique_ptr<DataChunk> FetchRaw() override;
 	//! Converts the QueryResult to a string
 	DUCKDB_API string ToString() override;
+	DUCKDB_API string ToBox(BoxRendererContext &context, const BoxRendererConfig &config) override;
 
 	//! Gets the (index) value of the (column index) column.
 	//! Note: this is very slow. Scanning over the underlying collection is much faster.
@@ -48,6 +48,12 @@ public:
 
 	//! Returns a reference to the underlying column data collection
 	ColumnDataCollection &Collection();
+
+	//! Takes ownership of the collection, 'collection' is null after this operation
+	unique_ptr<ColumnDataCollection> TakeCollection();
+
+protected:
+	DUCKDB_API unique_ptr<DataChunk> FetchInternal() override;
 
 private:
 	unique_ptr<ColumnDataCollection> collection;

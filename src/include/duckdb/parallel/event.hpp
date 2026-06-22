@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/execution/executor.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/vector.hpp"
@@ -16,9 +17,9 @@ namespace duckdb {
 class Executor;
 class Task;
 
-class Event : public std::enable_shared_from_this<Event> {
+class Event : public enable_shared_from_this<Event> {
 public:
-	Event(Executor &executor);
+	explicit Event(Executor &executor);
 	virtual ~Event() = default;
 
 public:
@@ -37,11 +38,11 @@ public:
 	bool HasDependencies() const {
 		return total_dependencies != 0;
 	}
-	const vector<Event *> &GetParentsVerification() const;
+	const vector<reference<Event>> &GetParentsVerification() const;
 
 	void CompleteDependency();
 
-	void SetTasks(vector<unique_ptr<Task>> tasks);
+	void SetTasks(vector<shared_ptr<Task>> tasks);
 
 	void InsertEvent(shared_ptr<Event> replacement_event);
 
@@ -50,6 +51,19 @@ public:
 	}
 
 	virtual void PrintPipeline() {
+	}
+
+	ClientContext &GetClientContext();
+
+	template <class TARGET>
+	TARGET &Cast() {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<TARGET &>(*this);
+	}
+	template <class TARGET>
+	const TARGET &Cast() const {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<const TARGET &>(*this);
 	}
 
 protected:
@@ -68,7 +82,7 @@ protected:
 	//! The events that depend on this event to run
 	vector<weak_ptr<Event>> parents;
 	//! Raw pointers to the parents (used for verification only)
-	vector<Event *> parents_raw;
+	vector<reference<Event>> parents_raw;
 
 	//! Whether or not the event is finished executing
 	atomic<bool> finished;

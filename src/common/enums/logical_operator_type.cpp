@@ -20,6 +20,10 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "EXPRESSION_GET";
 	case LogicalOperatorType::LOGICAL_ANY_JOIN:
 		return "ANY_JOIN";
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+		return "ASOF_JOIN";
+	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:
+		return "DEPENDENT_JOIN";
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 		return "COMPARISON_JOIN";
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
@@ -42,14 +46,16 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "TOP_N";
 	case LogicalOperatorType::LOGICAL_SAMPLE:
 		return "SAMPLE";
-	case LogicalOperatorType::LOGICAL_LIMIT_PERCENT:
-		return "LIMIT_PERCENT";
 	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:
 		return "COPY_TO_FILE";
+	case LogicalOperatorType::LOGICAL_COPY_DATABASE:
+		return "COPY_DATABASE";
 	case LogicalOperatorType::LOGICAL_JOIN:
 		return "JOIN";
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
 		return "CROSS_PRODUCT";
+	case LogicalOperatorType::LOGICAL_POSITIONAL_JOIN:
+		return "POSITIONAL_JOIN";
 	case LogicalOperatorType::LOGICAL_UNION:
 		return "UNION";
 	case LogicalOperatorType::LOGICAL_EXCEPT:
@@ -64,6 +70,10 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "DELETE";
 	case LogicalOperatorType::LOGICAL_UPDATE:
 		return "UPDATE";
+	case LogicalOperatorType::LOGICAL_MERGE_INTO:
+		return "MERGE_INTO";
+	case LogicalOperatorType::LOGICAL_TRIGGER:
+		return "TRIGGER";
 	case LogicalOperatorType::LOGICAL_PREPARE:
 		return "PREPARE";
 	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
@@ -82,10 +92,10 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "VACUUM";
 	case LogicalOperatorType::LOGICAL_RECURSIVE_CTE:
 		return "REC_CTE";
+	case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE:
+		return "CTE";
 	case LogicalOperatorType::LOGICAL_CTE_REF:
 		return "CTE_SCAN";
-	case LogicalOperatorType::LOGICAL_SHOW:
-		return "SHOW";
 	case LogicalOperatorType::LOGICAL_ALTER:
 		return "ALTER";
 	case LogicalOperatorType::LOGICAL_CREATE_SEQUENCE:
@@ -96,6 +106,14 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "CREATE_VIEW";
 	case LogicalOperatorType::LOGICAL_CREATE_SCHEMA:
 		return "CREATE_SCHEMA";
+	case LogicalOperatorType::LOGICAL_CREATE_SECRET:
+		return "CREATE_SECRET";
+	case LogicalOperatorType::LOGICAL_ATTACH:
+		return "ATTACH";
+	case LogicalOperatorType::LOGICAL_DETACH:
+		return "DETACH";
+	case LogicalOperatorType::LOGICAL_CREATE_TRIGGER:
+		return "CREATE_TRIGGER";
 	case LogicalOperatorType::LOGICAL_DROP:
 		return "DROP";
 	case LogicalOperatorType::LOGICAL_PRAGMA:
@@ -106,12 +124,22 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "EXPORT";
 	case LogicalOperatorType::LOGICAL_SET:
 		return "SET";
+	case LogicalOperatorType::LOGICAL_RESET:
+		return "RESET";
 	case LogicalOperatorType::LOGICAL_LOAD:
 		return "LOAD";
 	case LogicalOperatorType::LOGICAL_INVALID:
 		break;
 	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR:
 		return "CUSTOM_OP";
+	case LogicalOperatorType::LOGICAL_PIVOT:
+		return "PIVOT";
+	case LogicalOperatorType::LOGICAL_UPDATE_EXTENSIONS:
+		return "UPDATE_EXTENSIONS";
+	case LogicalOperatorType::LOGICAL_CONNECT:
+		return "CONNECT";
+	case LogicalOperatorType::LOGICAL_DISCONNECT:
+		return "DISCONNECT";
 	}
 	return "INVALID";
 }

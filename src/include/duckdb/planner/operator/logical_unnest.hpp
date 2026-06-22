@@ -12,20 +12,24 @@
 
 namespace duckdb {
 
-//! LogicalAggregate represents an aggregate operation with (optional) GROUP BY
-//! operator.
+//! LogicalUnnest represents the logical UNNEST operator.
 class LogicalUnnest : public LogicalOperator {
 public:
-	explicit LogicalUnnest(idx_t unnest_index)
+	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_UNNEST;
+
+public:
+	explicit LogicalUnnest(TableIndex unnest_index)
 	    : LogicalOperator(LogicalOperatorType::LOGICAL_UNNEST), unnest_index(unnest_index) {
 	}
 
-	idx_t unnest_index;
+	TableIndex unnest_index;
 
 public:
 	vector<ColumnBinding> GetColumnBindings() override;
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
+	vector<TableIndex> GetTableIndex() const override;
+	string GetName() const override;
 
 protected:
 	void ResolveTypes() override;

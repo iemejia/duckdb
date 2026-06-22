@@ -1,5 +1,16 @@
 import os
+
 # list all include directories
-include_directories = [os.path.sep.join(x.split('/')) for x in ['extension/json/include', 'extension/json/yyjson/include']]
+include_directories = [os.path.sep.join(x.split('/')) for x in ['extension/json/include']]
+
+
 # source files
-source_files = [os.path.sep.join(x.split('/')) for x in ['extension/json/json-extension.cpp', 'extension/json/json_common.cpp', 'extension/json/json_functions/json_array_length.cpp', 'extension/json/json_functions/json_contains.cpp', 'extension/json/json_functions/json_extract.cpp', 'extension/json/json_functions/json_merge_patch.cpp', 'extension/json/json_functions/json_structure.cpp', 'extension/json/json_functions/json_transform.cpp', 'extension/json/json_functions/json_create.cpp', 'extension/json/json_functions/json_type.cpp', 'extension/json/json_functions/json_valid.cpp', 'extension/json/yyjson/yyjson.cpp']]
+def list_files_recursive(rootdir, suffix):
+    file_list = []
+    for root, _, files in os.walk(rootdir):
+        file_list += [os.path.join(root, f) for f in files if f.endswith(suffix)]
+    return file_list
+
+
+prefix = os.path.join('extension', 'json')
+source_files = list_files_recursive(prefix, '.cpp')

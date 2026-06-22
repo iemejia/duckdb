@@ -1,3 +1,12 @@
+//===----------------------------------------------------------------------===//
+//
+//                         DuckDB
+//
+// capi_tester.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
 #pragma once
 
 #include "catch.hpp"
@@ -31,6 +40,24 @@ public:
 	uint64_t *GetValidity(idx_t col) {
 		return duckdb_vector_get_validity(GetVector(col));
 	}
+	duckdb_vector GetListChildVector(idx_t col) {
+		return duckdb_list_vector_get_child(GetVector(col));
+	}
+	void *GetListChildData(idx_t col) {
+		return duckdb_vector_get_data(GetListChildVector(col));
+	}
+	duckdb_vector GetStructChildVector(idx_t col, idx_t idx) {
+		return duckdb_struct_vector_get_child(GetVector(col), idx);
+	}
+	void *GetStructChildData(idx_t col, idx_t idx) {
+		return duckdb_vector_get_data(GetStructChildVector(col, idx));
+	}
+	duckdb_vector GetArrayChildVector(idx_t col) {
+		return duckdb_array_vector_get_child(GetVector(col));
+	}
+	void *GetArrayChildData(idx_t col) {
+		return duckdb_vector_get_data(GetArrayChildVector(col));
+	}
 	duckdb_data_chunk GetChunk() {
 		return chunk;
 	}
@@ -57,6 +84,14 @@ public:
 		success = (duckdb_query(connection, query.c_str(), &result) == DuckDBSuccess);
 		if (!success) {
 			REQUIRE(ErrorMessage() != nullptr);
+			REQUIRE(ErrorType() != DUCKDB_ERROR_INVALID);
+		}
+	}
+	void QueryPrepared(duckdb_prepared_statement statement) {
+		success = duckdb_execute_prepared(statement, &result) == DuckDBSuccess;
+		if (!success) {
+			REQUIRE(ErrorMessage() != nullptr);
+			REQUIRE(ErrorType() != DUCKDB_ERROR_INVALID);
 		}
 	}
 
@@ -68,12 +103,32 @@ public:
 		return duckdb_result_chunk_count(result);
 	}
 
+	unique_ptr<CAPIDataChunk> StreamChunk() {
+		auto chunk = duckdb_stream_fetch_chunk(result);
+		if (!chunk) {
+			return nullptr;
+		}
+		return make_uniq<CAPIDataChunk>(chunk);
+	}
+
+	bool IsStreaming() {
+		return duckdb_result_is_streaming(result);
+	}
+
 	unique_ptr<CAPIDataChunk> FetchChunk(idx_t chunk_idx) {
 		auto chunk = duckdb_result_get_chunk(result, chunk_idx);
 		if (!chunk) {
 			return nullptr;
 		}
-		return make_unique<CAPIDataChunk>(chunk);
+		return make_uniq<CAPIDataChunk>(chunk);
+	}
+
+	unique_ptr<CAPIDataChunk> NextChunk() {
+		auto chunk = duckdb_fetch_chunk(result);
+		if (!chunk) {
+			return nullptr;
+		}
+		return make_uniq<CAPIDataChunk>(chunk);
 	}
 
 	template <class T>
@@ -107,6 +162,9 @@ public:
 	const char *ErrorMessage() {
 		return duckdb_result_error(&result);
 	}
+	duckdb_error_type ErrorType() {
+		return duckdb_result_error_type(&result);
+	}
 
 	string ColumnName(idx_t col) {
 		auto colname = duckdb_column_name(&result, col);
@@ -120,7 +178,7 @@ public:
 public:
 	bool success = false;
 
-private:
+protected:
 	duckdb_result result;
 };
 
@@ -153,7 +211,15 @@ duckdb_date CAPIResult::Fetch(idx_t col, idx_t row);
 template <>
 duckdb_time CAPIResult::Fetch(idx_t col, idx_t row);
 template <>
+duckdb_time_ns CAPIResult::Fetch(idx_t col, idx_t row);
+template <>
 duckdb_timestamp CAPIResult::Fetch(idx_t col, idx_t row);
+template <>
+duckdb_timestamp_s CAPIResult::Fetch(idx_t col, idx_t row);
+template <>
+duckdb_timestamp_ms CAPIResult::Fetch(idx_t col, idx_t row);
+template <>
+duckdb_timestamp_ns CAPIResult::Fetch(idx_t col, idx_t row);
 template <>
 duckdb_interval CAPIResult::Fetch(idx_t col, idx_t row);
 template <>
@@ -168,6 +234,8 @@ template <>
 duckdb_timestamp_struct CAPIResult::Fetch(idx_t col, idx_t row);
 template <>
 duckdb_hugeint CAPIResult::Fetch(idx_t col, idx_t row);
+template <>
+duckdb_uhugeint CAPIResult::Fetch(idx_t col, idx_t row);
 
 class CAPITester {
 public:
@@ -193,21 +261,81 @@ public:
 		if (duckdb_open(path, &database) != DuckDBSuccess) {
 			return false;
 		}
-		if (duckdb_connect(database, &connection) != DuckDBSuccess) {
-			return false;
-		}
-		return true;
+		return duckdb_connect(database, &connection) == DuckDBSuccess;
 	}
 
-	unique_ptr<CAPIResult> Query(string query) {
+	bool ChangeConnection() {
+		duckdb_disconnect(&connection);
+		return duckdb_connect(database, &connection) == DuckDBSuccess;
+	}
+
+	duckdb::unique_ptr<CAPIResult> Query(string query) {
 		D_ASSERT(connection);
-		auto result = make_unique<CAPIResult>();
+		auto result = make_uniq<CAPIResult>();
 		result->Query(connection, query);
+		return result;
+	}
+	duckdb::unique_ptr<CAPIResult> QueryPrepared(duckdb_prepared_statement prepared) {
+		D_ASSERT(connection);
+		auto result = make_uniq<CAPIResult>();
+		result->QueryPrepared(prepared);
 		return result;
 	}
 
 	duckdb_database database = nullptr;
 	duckdb_connection connection = nullptr;
+};
+
+struct CAPIPrepared {
+	CAPIPrepared() {
+	}
+	~CAPIPrepared() {
+		if (!prepared) {
+			return;
+		}
+		duckdb_destroy_prepare(&prepared);
+	}
+
+	bool Prepare(CAPITester &tester, const string &query) {
+		auto state = duckdb_prepare(tester.connection, query.c_str(), &prepared);
+		return state == DuckDBSuccess;
+	}
+
+	duckdb_prepared_statement prepared = nullptr;
+};
+
+struct CAPIPending {
+	CAPIPending() {
+	}
+	~CAPIPending() {
+		if (!pending) {
+			return;
+		}
+		duckdb_destroy_pending(&pending);
+	}
+
+	bool Pending(CAPIPrepared &prepared) {
+		auto state = duckdb_pending_prepared(prepared.prepared, &pending);
+		return state == DuckDBSuccess;
+	}
+
+	bool PendingStreaming(CAPIPrepared &prepared) {
+		auto state = duckdb_pending_prepared_streaming(prepared.prepared, &pending);
+		return state == DuckDBSuccess;
+	}
+
+	duckdb_pending_state ExecuteTask() {
+		REQUIRE(pending);
+		return duckdb_pending_execute_task(pending);
+	}
+
+	unique_ptr<CAPIResult> Execute() {
+		duckdb_result result;
+		auto success = duckdb_execute_pending(pending, &result) == DuckDBSuccess;
+		return make_uniq<CAPIResult>(result, success);
+	}
+
+	duckdb_pending_result pending = nullptr;
 };
 
 } // namespace duckdb

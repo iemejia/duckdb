@@ -1,135 +1,44 @@
 #include "duckdb/planner/expression_binder/select_binder.hpp"
-
 #include "duckdb/parser/expression/columnref_expression.hpp"
-#include "duckdb/parser/expression/window_expression.hpp"
-#include "duckdb/parser/parsed_expression_iterator.hpp"
-#include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_window_expression.hpp"
-#include "duckdb/planner/expression_binder/aggregate_binder.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
-#include "duckdb/parser/expression/operator_expression.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
 
-SelectBinder::SelectBinder(Binder &binder, ClientContext &context, BoundSelectNode &node, BoundGroupInformation &info,
-                           case_insensitive_map_t<idx_t> alias_map)
-    : ExpressionBinder(binder, context), inside_window(false), node(node), info(info), alias_map(move(alias_map)) {
+SelectBinder::SelectBinder(Binder &binder, ClientContext &context, BoundSelectNode &node)
+    : BaseSelectBinder(binder, context, node) {
 }
 
-SelectBinder::SelectBinder(Binder &binder, ClientContext &context, BoundSelectNode &node, BoundGroupInformation &info)
-    : SelectBinder(binder, context, node, info, case_insensitive_map_t<idx_t>()) {
-}
+bool SelectBinder::TryResolveAliasReference(ColumnRefExpression &colref, idx_t depth, bool root_expression,
+                                            BindResult &result, unique_ptr<ParsedExpression> &expr_ptr) {
+	// must be a qualified alias.<name>
+	if (!ExpressionBinder::IsPotentialAlias(colref)) {
+		return false;
+	}
 
-BindResult SelectBinder::BindExpression(unique_ptr<ParsedExpression> *expr_ptr, idx_t depth, bool root_expression) {
-	auto &expr = **expr_ptr;
-	// check if the expression binds to one of the groups
-	auto group_index = TryBindGroup(expr, depth);
-	if (group_index != DConstants::INVALID_INDEX) {
-		return BindGroup(expr, depth, group_index);
+	const auto &alias_name = colref.ColumnNames().back();
+	auto entry = node.bind_state.alias_map.find(alias_name);
+	if (entry == node.bind_state.alias_map.end()) {
+		return false;
 	}
-	switch (expr.expression_class) {
-	case ExpressionClass::COLUMN_REF:
-		return BindColumnRef(expr_ptr, depth);
-	case ExpressionClass::DEFAULT:
-		return BindResult("SELECT clause cannot contain DEFAULT clause");
-	case ExpressionClass::WINDOW:
-		return BindWindow((WindowExpression &)expr, depth);
-	default:
-		return ExpressionBinder::BindExpression(expr_ptr, depth);
-	}
-}
 
-idx_t SelectBinder::TryBindGroup(ParsedExpression &expr, idx_t depth) {
-	// first check the group alias map, if expr is a ColumnRefExpression
-	if (expr.type == ExpressionType::COLUMN_REF) {
-		auto &colref = (ColumnRefExpression &)expr;
-		if (!colref.IsQualified()) {
-			auto alias_entry = info.alias_map.find(colref.column_names[0]);
-			if (alias_entry != info.alias_map.end()) {
-				// found entry!
-				return alias_entry->second;
-			}
-		}
+	auto alias_index = entry->second;
+	// Simple way to prevent circular aliasing (`SELECT alias.y as x, alias.x as y;`)
+	if (alias_index >= node.bound_column_count) {
+		throw BinderException("Column \"%s\" referenced that exists in the SELECT clause - but this column "
+		                      "cannot be referenced before it is defined",
+		                      colref.ColumnNames().back());
 	}
-	// no alias reference found
-	// check the list of group columns for a match
-	auto entry = info.map.find(&expr);
-	if (entry != info.map.end()) {
-		return entry->second;
-	}
-#ifdef DEBUG
-	for (auto entry : info.map) {
-		D_ASSERT(!entry.first->Equals(&expr));
-		D_ASSERT(!expr.Equals(entry.first));
-	}
-#endif
-	return DConstants::INVALID_INDEX;
-}
 
-BindResult SelectBinder::BindColumnRef(unique_ptr<ParsedExpression> *expr_ptr, idx_t depth) {
-	// first try to bind the column reference regularly
-	auto result = ExpressionBinder::BindExpression(expr_ptr, depth);
-	if (!result.HasError()) {
-		return result;
+	if (node.bind_state.AliasHasSubquery(alias_index)) {
+		throw BinderException(colref,
+		                      "Alias \"%s\" referenced in a SELECT clause - but the expression has a subquery. This is "
+		                      "not yet supported.",
+		                      alias_name);
 	}
-	// binding failed
-	// check in the alias map
-	auto &colref = (ColumnRefExpression &)**expr_ptr;
-	if (!colref.IsQualified()) {
-		auto alias_entry = alias_map.find(colref.column_names[0]);
-		if (alias_entry != alias_map.end()) {
-			// found entry!
-			auto index = alias_entry->second;
-			if (index >= node.select_list.size()) {
-				throw BinderException("Column \"%s\" referenced that exists in the SELECT clause - but this column "
-				                      "cannot be referenced before it is defined",
-				                      colref.column_names[0]);
-			}
-			if (node.select_list[index]->HasSideEffects()) {
-				throw BinderException("Alias \"%s\" referenced in a SELECT clause - but the expression has side "
-				                      "effects. This is not yet supported.",
-				                      colref.column_names[0]);
-			}
-			return BindResult(node.select_list[index]->Copy());
-		}
-	}
-	// entry was not found in the alias map: return the original error
-	return result;
-}
-
-BindResult SelectBinder::BindGroupingFunction(OperatorExpression &op, idx_t depth) {
-	if (op.children.empty()) {
-		throw InternalException("GROUPING requires at least one child");
-	}
-	if (node.groups.group_expressions.empty()) {
-		return BindResult(binder.FormatError(op, "GROUPING statement cannot be used without groups"));
-	}
-	if (op.children.size() >= 64) {
-		return BindResult(binder.FormatError(op, "GROUPING statement cannot have more than 64 groups"));
-	}
-	vector<idx_t> group_indexes;
-	group_indexes.reserve(op.children.size());
-	for (auto &child : op.children) {
-		ExpressionBinder::QualifyColumnNames(binder, child);
-		auto idx = TryBindGroup(*child, depth);
-		if (idx == DConstants::INVALID_INDEX) {
-			return BindResult(binder.FormatError(
-			    op, StringUtil::Format("GROUPING child \"%s\" must be a grouping column", child->GetName())));
-		}
-		group_indexes.push_back(idx);
-	}
-	auto col_idx = node.grouping_functions.size();
-	node.grouping_functions.push_back(move(group_indexes));
-	return BindResult(make_unique<BoundColumnRefExpression>(op.GetName(), LogicalType::BIGINT,
-	                                                        ColumnBinding(node.groupings_index, col_idx), depth));
-}
-
-BindResult SelectBinder::BindGroup(ParsedExpression &expr, idx_t depth, idx_t group_index) {
-	auto &group = node.groups.group_expressions[group_index];
-	return BindResult(make_unique<BoundColumnRefExpression>(expr.GetName(), group->return_type,
-	                                                        ColumnBinding(node.group_index, group_index), depth));
+	auto copied_unbound = node.bind_state.BindAlias(alias_index);
+	result = BindExpression(copied_unbound, depth, false);
+	return true;
 }
 
 } // namespace duckdb

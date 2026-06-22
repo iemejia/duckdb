@@ -41,6 +41,9 @@ enum class WALType : uint8_t {
 	CREATE_TABLE_MACRO = 21,
 	DROP_TABLE_MACRO = 22,
 
+	CREATE_INDEX = 23,
+	DROP_INDEX = 24,
+
 	// -----------------------------
 	// Data
 	// -----------------------------
@@ -48,9 +51,14 @@ enum class WALType : uint8_t {
 	INSERT_TUPLE = 26,
 	DELETE_TUPLE = 27,
 	UPDATE_TUPLE = 28,
+	ROW_GROUP_DATA = 29,
+
+	CREATE_TRIGGER = 30,
+	DROP_TRIGGER = 31,
 	// -----------------------------
 	// Flush
 	// -----------------------------
+	WAL_VERSION = 98,
 	CHECKPOINT = 99,
 	WAL_FLUSH = 100
 };

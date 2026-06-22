@@ -2,12 +2,34 @@ import Base.Threads.@spawn
 
 mutable struct QueryResult
     handle::Ref{duckdb_result}
-    df::DataFrame
+    names::Vector{Symbol}
+    types::Vector{Type}
+    tbl::Union{Missing, NamedTuple}
+    chunk_index::UInt64
 
     function QueryResult(handle::Ref{duckdb_result})
-        df = toDataFrame(handle)
+        column_count = duckdb_column_count(handle)
+        names::Vector{Symbol} = Vector()
+        for i in 1:column_count
+            name = sym(duckdb_column_name(handle, i))
+            if name in view(names, 1:(i - 1))
+                j = 1
+                new_name = Symbol(name, :_, j)
+                while new_name in view(names, 1:(i - 1))
+                    j += 1
+                    new_name = Symbol(name, :_, j)
+                end
+                name = new_name
+            end
+            push!(names, name)
+        end
+        types::Vector{Type} = Vector()
+        for i in 1:column_count
+            logical_type = LogicalType(duckdb_column_logical_type(handle, i))
+            push!(types, Union{Missing, duckdb_type_to_julia_type(logical_type)})
+        end
 
-        result = new(handle, df)
+        result = new(handle, names, types, missing, 1)
         finalizer(_close_result, result)
         return result
     end
@@ -18,8 +40,10 @@ function _close_result(result::QueryResult)
     return
 end
 
-mutable struct ColumnConversionData
-    chunks::Vector{DataChunk}
+const DataChunks = Union{Vector{DataChunk}, Tuple{DataChunk}}
+
+mutable struct ColumnConversionData{ChunksT <: DataChunks}
+    chunks::ChunksT
     col_idx::Int64
     logical_type::LogicalType
     conversion_data::Any
@@ -32,6 +56,7 @@ mutable struct ListConversionData
     internal_type::Type
     target_type::Type
     child_conversion_data::Any
+    array_size::UInt64
 end
 
 mutable struct StructConversionData
@@ -39,69 +64,50 @@ mutable struct StructConversionData
     child_conversion_data::Vector{ListConversionData}
 end
 
-function nop_convert(column_data::ColumnConversionData, val)
-    return val
+nop_convert(column_data::ColumnConversionData, val) = val
+
+function _string_data_ptr(val::Ptr{Cvoid}, idx::UInt64)
+    base_ptr = val + (idx - 1) * sizeof(duckdb_string_t)
+    len = unsafe_load(Base.unsafe_convert(Ptr{Int32}, base_ptr))
+    data_ptr = if len <= STRING_INLINE_LENGTH
+        Base.unsafe_convert(Ptr{UInt8}, base_ptr + sizeof(Int32))
+    else
+        Base.unsafe_load(Base.unsafe_convert(Ptr{Ptr{UInt8}}, base_ptr + sizeof(Int32) * 2))
+    end
+    return data_ptr, len
 end
 
 function convert_string(column_data::ColumnConversionData, val::Ptr{Cvoid}, idx::UInt64)
-    base_ptr = val + (idx - 1) * sizeof(duckdb_string_t)
-    length_ptr = Base.unsafe_convert(Ptr{Int32}, base_ptr)
-    length = unsafe_load(length_ptr)
-    if length <= STRING_INLINE_LENGTH
-        prefix_ptr = Base.unsafe_convert(Ptr{UInt8}, base_ptr + sizeof(Int32))
-        return unsafe_string(prefix_ptr, length)
-    else
-        ptr_ptr = Base.unsafe_convert(Ptr{Ptr{UInt8}}, base_ptr + sizeof(Int32) * 2)
-        data_ptr = Base.unsafe_load(ptr_ptr)
-        return unsafe_string(data_ptr, length)
-    end
+    data_ptr, len = _string_data_ptr(val, idx)
+    return unsafe_string(data_ptr, len)
 end
 
-function convert_blob(column_data::ColumnConversionData, val::Ptr{Cvoid}, idx::UInt64)::Base.CodeUnits{UInt8, String}
-    return Base.codeunits(convert_string(column_data, val, idx))
+function convert_blob(column_data::ColumnConversionData, val::Ptr{Cvoid}, idx::UInt64)::Vector{UInt8}
+    data_ptr, len = _string_data_ptr(val, idx)
+    return unsafe_wrap(Array, data_ptr, len; own = false) |> copy
 end
 
-function convert_date(column_data::ColumnConversionData, val::Int32)::Date
-    return Dates.epochdays2date(val + ROUNDING_EPOCH_TO_UNIX_EPOCH_DAYS)
+function convert_geometry(
+    column_data::ColumnConversionData,
+    val::Ptr{Cvoid},
+    idx::UInt64
+)::Base.CodeUnits{UInt8, String}
+    data_ptr, len = _string_data_ptr(val, idx)
+    return codeunits(unsafe_string(data_ptr, len))
 end
 
-function convert_time(column_data::ColumnConversionData, val::Int64)::Time
-    return Dates.Time(Dates.Nanosecond(val * 1000))
-end
+convert_date(column_data::ColumnConversionData, val) = convert(Date, val)
+convert_time(column_data::ColumnConversionData, val) = convert(Time, val)
+convert_time_tz(column_data::ColumnConversionData, val) = convert(Time, convert(duckdb_time_tz, val))
+convert_timestamp(column_data::ColumnConversionData, val) = convert(DateTime, convert(duckdb_timestamp, val))
+convert_timestamp_s(column_data::ColumnConversionData, val) = convert(DateTime, convert(duckdb_timestamp_s, val))
+convert_timestamp_ms(column_data::ColumnConversionData, val) = convert(DateTime, convert(duckdb_timestamp_ms, val))
+convert_timestamp_ns(column_data::ColumnConversionData, val) = convert(DateTime, convert(duckdb_timestamp_ns, val))
+convert_interval(column_data::ColumnConversionData, val::duckdb_interval) = convert(Dates.CompoundPeriod, val)
+convert_hugeint(column_data::ColumnConversionData, val::duckdb_hugeint) = convert(Int128, val)
+convert_uhugeint(column_data::ColumnConversionData, val::duckdb_uhugeint) = convert(UInt128, val)
+convert_uuid(column_data::ColumnConversionData, val::duckdb_hugeint) = convert(UUID, val)
 
-function convert_timestamp(column_data::ColumnConversionData, val::Int64)::DateTime
-    return Dates.epochms2datetime((val ÷ 1000) + ROUNDING_EPOCH_TO_UNIX_EPOCH_MS)
-end
-
-function convert_timestamp_s(column_data::ColumnConversionData, val::Int64)::DateTime
-    return Dates.epochms2datetime((val * 1000) + ROUNDING_EPOCH_TO_UNIX_EPOCH_MS)
-end
-
-function convert_timestamp_ms(column_data::ColumnConversionData, val::Int64)::DateTime
-    return Dates.epochms2datetime((val) + ROUNDING_EPOCH_TO_UNIX_EPOCH_MS)
-end
-
-function convert_timestamp_ns(column_data::ColumnConversionData, val::Int64)::DateTime
-    return Dates.epochms2datetime((val ÷ 1000000) + ROUNDING_EPOCH_TO_UNIX_EPOCH_MS)
-end
-
-function convert_interval(column_data::ColumnConversionData, val::duckdb_interval)::Dates.CompoundPeriod
-    return Dates.CompoundPeriod(Dates.Month(val.months), Dates.Day(val.days), Dates.Microsecond(val.micros))
-end
-
-function convert_hugeint(column_data::ColumnConversionData, val::duckdb_hugeint)::Int128
-    return Int128(val.lower) + Int128(val.upper) << 64
-end
-
-function convert_uuid(column_data::ColumnConversionData, val::duckdb_hugeint)::UUID
-    hugeint = convert_hugeint(column_data, val)
-    base_value = Int128(170141183460469231731687303715884105727)
-    if hugeint < 0
-        return UUID(UInt128(hugeint + base_value) + 1)
-    else
-        return UUID(UInt128(hugeint) + base_value + 1)
-    end
-end
 
 function convert_enum(column_data::ColumnConversionData, val)::String
     return column_data.conversion_data[val + 1]
@@ -126,9 +132,9 @@ function convert_vector(
     ::Type{SRC},
     ::Type{DST}
 ) where {SRC, DST}
-    array = get_array(vector, SRC)
+    array = get_array(vector, SRC, size)
     if !all_valid
-        validity = get_validity(vector)
+        validity = get_validity(vector, size)
     end
     for i in 1:size
         if all_valid || isvalid(validity, i)
@@ -153,7 +159,7 @@ function convert_vector_string(
     raw_ptr = duckdb_vector_get_data(vector.handle)
     ptr = Base.unsafe_convert(Ptr{duckdb_string_t}, raw_ptr)
     if !all_valid
-        validity = get_validity(vector)
+        validity = get_validity(vector, size)
     end
     for i in 1:size
         if all_valid || isvalid(validity, i)
@@ -196,14 +202,59 @@ function convert_vector_list(
         ldata.target_type
     )
 
-    array = get_array(vector, SRC)
+    array = get_array(vector, SRC, size)
     if !all_valid
-        validity = get_validity(vector)
+        validity = get_validity(vector, size)
     end
     for i in 1:size
         if all_valid || isvalid(validity, i)
             start_offset::UInt64 = array[i].offset + 1
             end_offset::UInt64 = array[i].offset + array[i].length
+            result[position] = child_array[start_offset:end_offset]
+        end
+        position += 1
+    end
+    return size
+end
+
+function convert_vector_array(
+    column_data::ColumnConversionData,
+    vector::Vec,
+    size::UInt64,
+    convert_func::Function,
+    result,
+    position,
+    all_valid,
+    ::Type{SRC},
+    ::Type{DST}
+) where {SRC, DST}
+    child_vector = array_child(vector)
+    ldata = column_data.conversion_data
+    arr_size = ldata.array_size
+    child_total = size * arr_size
+
+    child_column_data =
+        ColumnConversionData(column_data.chunks, column_data.col_idx, ldata.child_type, ldata.child_conversion_data)
+    child_array = Array{Union{Missing, ldata.target_type}}(missing, child_total)
+    ldata.conversion_loop_func(
+        child_column_data,
+        child_vector,
+        child_total,
+        ldata.conversion_func,
+        child_array,
+        1,
+        false,
+        ldata.internal_type,
+        ldata.target_type
+    )
+
+    if !all_valid
+        validity = get_validity(vector, size)
+    end
+    for i in 1:size
+        if all_valid || isvalid(validity, i)
+            start_offset::UInt64 = (i - 1) * arr_size + 1
+            end_offset::UInt64 = i * arr_size
             result[position] = child_array[start_offset:end_offset]
         end
         position += 1
@@ -254,7 +305,7 @@ function convert_vector_struct(
     child_arrays = convert_struct_children(column_data, vector, size)
 
     if !all_valid
-        validity = get_validity(vector)
+        validity = get_validity(vector, size)
     end
     for i in 1:size
         if all_valid || isvalid(validity, i)
@@ -263,6 +314,39 @@ function convert_vector_struct(
                 push!(result_tuple, child_arrays[child_idx][i])
             end
             result[position] = NamedTuple{column_data.conversion_data.tuple_type}(result_tuple)
+        end
+        position += 1
+    end
+    return size
+end
+
+function convert_vector_union(
+    column_data::ColumnConversionData,
+    vector::Vec,
+    size::UInt64,
+    convert_func::Function,
+    result,
+    position,
+    all_valid,
+    ::Type{SRC},
+    ::Type{DST}
+) where {SRC, DST}
+    child_arrays = convert_struct_children(column_data, vector, size)
+
+    if !all_valid
+        validity = get_validity(vector, size)
+    end
+    for row in 1:size
+        # For every row/record
+        if all_valid || isvalid(validity, row)
+            # Get the tag of this row
+            tag::UInt64 = child_arrays[1][row]
+            type::DataType = duckdb_type_to_julia_type(get_union_member_type(column_data.logical_type, tag + 1))
+            # Get the value from the child array indicated by the tag
+            # Offset by 1 because of julia
+            # Offset by another 1 because of the tag vector
+            value = child_arrays[tag + 2][row]
+            result[position] = isequal(value, missing) ? missing : type(value)
         end
         position += 1
     end
@@ -280,19 +364,41 @@ function convert_vector_map(
     ::Type{SRC},
     ::Type{DST}
 ) where {SRC, DST}
-    child_arrays = convert_struct_children(column_data, vector, size)
+    child_vector = list_child(vector)
+    lsize = list_size(vector)
+
+    # convert the child vector
+    ldata = column_data.conversion_data
+
+    child_column_data =
+        ColumnConversionData(column_data.chunks, column_data.col_idx, ldata.child_type, ldata.child_conversion_data)
+    child_array = Array{Union{Missing, ldata.target_type}}(missing, lsize)
+    ldata.conversion_loop_func(
+        child_column_data,
+        child_vector,
+        lsize,
+        ldata.conversion_func,
+        child_array,
+        1,
+        false,
+        ldata.internal_type,
+        ldata.target_type
+    )
+    child_arrays = convert_struct_children(child_column_data, child_vector, lsize)
     keys = child_arrays[1]
     values = child_arrays[2]
 
+    array = get_array(vector, SRC, size)
     if !all_valid
-        validity = get_validity(vector)
+        validity = get_validity(vector, size)
     end
     for i in 1:size
         if all_valid || isvalid(validity, i)
             result_dict = Dict()
-            key_count = length(keys[i])
-            for key_idx in 1:key_count
-                result_dict[keys[i][key_idx]] = values[i][key_idx]
+            start_offset::UInt64 = array[i].offset + 1
+            end_offset::UInt64 = array[i].offset + array[i].length
+            for key_idx in start_offset:end_offset
+                result_dict[keys[key_idx]] = values[key_idx]
             end
             result[position] = result_dict
         end
@@ -369,7 +475,8 @@ function create_child_conversion_data(child_type::LogicalType)
         child_type,
         internal_type,
         target_type,
-        child_conversion_data
+        child_conversion_data,
+        0
     )
 end
 
@@ -379,16 +486,31 @@ function init_conversion_loop(logical_type::LogicalType)
         return duckdb_type_to_julia_type(logical_type)
     elseif type == DUCKDB_TYPE_ENUM
         return get_enum_dictionary(logical_type)
-    elseif type == DUCKDB_TYPE_LIST
+    elseif type == DUCKDB_TYPE_LIST || type == DUCKDB_TYPE_MAP
         child_type = get_list_child_type(logical_type)
         return create_child_conversion_data(child_type)
-    elseif type == DUCKDB_TYPE_STRUCT || type == DUCKDB_TYPE_MAP
-        child_count = get_struct_child_count(logical_type)
+    elseif type == DUCKDB_TYPE_ARRAY
+        child_type = get_array_child_type(logical_type)
+        array_conv_data = create_child_conversion_data(child_type)
+        array_conv_data.array_size = get_array_size(logical_type)
+        return array_conv_data
+    elseif type == DUCKDB_TYPE_STRUCT || type == DUCKDB_TYPE_UNION
+        child_count_fun::Function = get_struct_child_count
+        child_type_fun::Function = get_struct_child_type
+        child_name_fun::Function = get_struct_child_name
+
+        #if type == DUCKDB_TYPE_UNION
+        #	child_count_fun = get_union_member_count
+        #	child_type_fun = get_union_member_type
+        #	child_name_fun = get_union_member_name
+        #end
+
+        child_count = child_count_fun(logical_type)
         child_symbols::Vector{Symbol} = Vector()
         child_data::Vector{ListConversionData} = Vector()
         for i in 1:child_count
-            child_symbol = Symbol(get_struct_child_name(logical_type, i))
-            child_type = get_struct_child_type(logical_type, i)
+            child_symbol = Symbol(child_name_fun(logical_type, i))
+            child_type = child_type_fun(logical_type, i)
             child_conv_data = create_child_conversion_data(child_type)
             push!(child_symbols, child_symbol)
             push!(child_data, child_conv_data)
@@ -401,15 +523,19 @@ end
 
 function get_conversion_function(logical_type::LogicalType)::Function
     type = get_type_id(logical_type)
-    if type == DUCKDB_TYPE_VARCHAR || type == DUCKDB_TYPE_JSON
+    if type == DUCKDB_TYPE_VARCHAR
         return convert_string
-    elseif type == DUCKDB_TYPE_BLOB
+    elseif type == DUCKDB_TYPE_BLOB || type == DUCKDB_TYPE_BIT
         return convert_blob
+    elseif type == DUCKDB_TYPE_GEOMETRY
+        return convert_geometry
     elseif type == DUCKDB_TYPE_DATE
         return convert_date
     elseif type == DUCKDB_TYPE_TIME
         return convert_time
-    elseif type == DUCKDB_TYPE_TIMESTAMP
+    elseif type == DUCKDB_TYPE_TIME_TZ
+        return convert_time_tz
+    elseif type == DUCKDB_TYPE_TIMESTAMP || type == DUCKDB_TYPE_TIMESTAMP_TZ
         return convert_timestamp
     elseif type == DUCKDB_TYPE_TIMESTAMP_S
         return convert_timestamp_s
@@ -417,10 +543,14 @@ function get_conversion_function(logical_type::LogicalType)::Function
         return convert_timestamp_ms
     elseif type == DUCKDB_TYPE_TIMESTAMP_NS
         return convert_timestamp_ns
+    elseif type == DUCKDB_TYPE_TIMESTAMP_TZ_NS
+        return convert_timestamp_ns
     elseif type == DUCKDB_TYPE_INTERVAL
         return convert_interval
     elseif type == DUCKDB_TYPE_HUGEINT
         return convert_hugeint
+    elseif type == DUCKDB_TYPE_UHUGEINT
+        return convert_uhugeint
     elseif type == DUCKDB_TYPE_UUID
         return convert_uuid
     elseif type == DUCKDB_TYPE_DECIMAL
@@ -439,14 +569,21 @@ end
 
 function get_conversion_loop_function(logical_type::LogicalType)::Function
     type = get_type_id(logical_type)
-    if type == DUCKDB_TYPE_VARCHAR || type == DUCKDB_TYPE_BLOB || type == DUCKDB_TYPE_JSON
+    if type == DUCKDB_TYPE_VARCHAR ||
+       type == DUCKDB_TYPE_BLOB ||
+       type == DUCKDB_TYPE_BIT ||
+       type == DUCKDB_TYPE_GEOMETRY
         return convert_vector_string
     elseif type == DUCKDB_TYPE_LIST
         return convert_vector_list
+    elseif type == DUCKDB_TYPE_ARRAY
+        return convert_vector_array
     elseif type == DUCKDB_TYPE_STRUCT
         return convert_vector_struct
     elseif type == DUCKDB_TYPE_MAP
         return convert_vector_map
+    elseif type == DUCKDB_TYPE_UNION
+        return convert_vector_union
     else
         return convert_vector
     end
@@ -464,38 +601,39 @@ function convert_column(column_data::ColumnConversionData)
     return convert_column_loop(column_data, conversion_func, internal_type, target_type, conversion_loop_func)
 end
 
-function toDataFrame(result::Ref{duckdb_result})::DataFrame
-    column_count = duckdb_column_count(result)
-    # duplicate eliminate the names
-    names = Vector{Symbol}(undef, column_count)
-    for i in 1:column_count
-        name = sym(duckdb_column_name(result, i))
-        if name in view(names, 1:(i - 1))
-            j = 1
-            new_name = Symbol(name, :_, j)
-            while new_name in view(names, 1:(i - 1))
-                j += 1
-                new_name = Symbol(name, :_, j)
-            end
-            name = new_name
-        end
-        names[i] = name
-    end
-    # gather all the data chunks
-    chunk_count = duckdb_result_chunk_count(result[])
-    chunks::Vector{DataChunk} = []
-    for i in 1:chunk_count
-        push!(chunks, DataChunk(duckdb_result_get_chunk(result[], i), true))
-    end
+function convert_columns(q::QueryResult, chunks::DataChunks, column_count::Integer = duckdb_column_count(q.handle))
+    return NamedTuple{Tuple(q.names)}(ntuple(column_count) do i
+        j = Int64(i)
+        logical_type = LogicalType(duckdb_column_logical_type(q.handle, j))
+        column_data = ColumnConversionData(chunks, j, logical_type, nothing)
+        return convert_column(column_data)
+    end)
+end
 
-    df = DataFrame()
-    for i in 1:column_count
-        name = names[i]
-        logical_type = LogicalType(duckdb_column_logical_type(result, i))
-        column_data = ColumnConversionData(chunks, i, logical_type, nothing)
-        df[!, name] = convert_column(column_data)
+function Tables.columns(q::QueryResult)
+    if q.tbl === missing
+        if q.chunk_index != 1
+            throw(
+                NotImplementedException(
+                    "Materializing into a Julia table is not supported after calling nextDataChunk"
+                )
+            )
+        end
+        # gather all the data chunks
+        chunks::Vector{DataChunk} = []
+        while true
+            # fetch the next chunk
+            chunk = DuckDB.nextDataChunk(q)
+            if chunk === missing
+                # consumed all chunks
+                break
+            end
+            push!(chunks, chunk)
+        end
+
+        q.tbl = convert_columns(q, chunks)
     end
-    return df
+    return Tables.CopiedColumns(q.tbl)
 end
 
 mutable struct PendingQueryResult
@@ -504,11 +642,27 @@ mutable struct PendingQueryResult
 
     function PendingQueryResult(stmt::Stmt)
         pending_handle = Ref{duckdb_pending_result}()
-        ret = duckdb_pending_prepared(stmt.handle, pending_handle)
+        ret = executePending(stmt.handle, pending_handle, stmt.result_type)
         result = new(pending_handle[], ret == DuckDBSuccess)
         finalizer(_close_pending_result, result)
         return result
     end
+end
+
+function executePending(
+    handle::duckdb_prepared_statement,
+    pending_handle::Ref{duckdb_pending_result},
+    ::Type{MaterializedResult}
+)
+    return duckdb_pending_prepared(handle, pending_handle)
+end
+
+function executePending(
+    handle::duckdb_prepared_statement,
+    pending_handle::Ref{duckdb_pending_result},
+    ::Type{StreamResult}
+)
+    return duckdb_pending_prepared_streaming(handle, pending_handle)
 end
 
 function _close_pending_result(pending::PendingQueryResult)
@@ -520,17 +674,17 @@ function _close_pending_result(pending::PendingQueryResult)
     return
 end
 
-function fetch_error(stmt::Stmt, error_ptr)
+function fetch_error(sql::AbstractString, error_ptr)
     if error_ptr == C_NULL
-        return string("Execute of query \"", stmt.sql, "\" failed: unknown error")
+        return string("Execute of query \"", sql, "\" failed: unknown error")
     else
-        return string("Execute of query \"", stmt.sql, "\" failed: ", unsafe_string(error_ptr))
+        return string("Execute of query \"", sql, "\" failed: ", unsafe_string(error_ptr))
     end
 end
 
 function get_error(stmt::Stmt, pending::PendingQueryResult)
     error_ptr = duckdb_pending_error(pending.handle)
-    error_message = fetch_error(stmt, error_ptr)
+    error_message = fetch_error(stmt.sql, error_ptr)
     _close_pending_result(pending)
     return error_message
 end
@@ -538,18 +692,27 @@ end
 # execute tasks from a pending query result in a loop
 function pending_execute_tasks(pending::PendingQueryResult)::Bool
     ret = DUCKDB_PENDING_RESULT_NOT_READY
-    while ret == DUCKDB_PENDING_RESULT_NOT_READY
+    while !duckdb_pending_execution_is_finished(ret)
         GC.safepoint()
         ret = duckdb_pending_execute_task(pending.handle)
     end
     return ret != DUCKDB_PENDING_ERROR
 end
 
+function pending_execute_check_state(pending::PendingQueryResult)::duckdb_pending_state
+    ret = duckdb_pending_execute_check_state(pending.handle)
+    return ret
+end
+
 # execute background tasks in a loop, until task execution is finished
-function execute_tasks(state::duckdb_task_state)
+function execute_tasks(state::duckdb_task_state, con::Connection)
     while !duckdb_task_state_is_finished(state)
-        GC.safepoint()
         duckdb_execute_n_tasks_state(state, 1)
+        GC.safepoint()
+        Base.yield()
+        if duckdb_execution_is_finished(con.handle)
+            break
+        end
     end
     return
 end
@@ -578,6 +741,42 @@ function cleanup_tasks(tasks, state)
     return
 end
 
+function execute_singlethreaded(pending::PendingQueryResult)::Bool
+    # Only when there are no additional threads, use the main thread to execute
+    success = true
+    try
+        # now start executing tasks of the pending result in a loop
+        success = pending_execute_tasks(pending)
+    catch ex
+        throw(ex)
+    end
+    return success
+end
+
+function execute_multithreaded(stmt::Stmt, pending::PendingQueryResult)
+    # if multi-threading is enabled, launch background tasks
+    task_state = duckdb_create_task_state(stmt.con.db.handle)
+
+    tasks = []
+    for _ in 1:Threads.nthreads()
+        task_val = @spawn execute_tasks(task_state, stmt.con)
+        push!(tasks, task_val)
+    end
+
+    # When we have additional worker threads, don't execute using the main thread
+    while duckdb_execution_is_finished(stmt.con.handle) == false
+        ret = pending_execute_check_state(pending)
+        if ret == DUCKDB_PENDING_RESULT_READY || ret == DUCKDB_PENDING_ERROR
+            break
+        end
+        Base.yield()
+        GC.safepoint()
+    end
+
+    # we finished execution of all tasks, cleanup the tasks
+    return cleanup_tasks(tasks, task_state)
+end
+
 # this function is responsible for executing a statement and returning a result
 function execute(stmt::Stmt, params::DBInterface.StatementParams = ())
     bind_parameters(stmt, params)
@@ -587,33 +786,23 @@ function execute(stmt::Stmt, params::DBInterface.StatementParams = ())
     if !pending.success
         throw(QueryException(get_error(stmt, pending)))
     end
-    # if multi-threading is enabled, launch background tasks
-    task_state = duckdb_create_task_state(stmt.con.db.handle)
-    tasks = []
-    for i in 2:Threads.nthreads()
-        task_val = @spawn execute_tasks(task_state)
-        push!(tasks, task_val)
-    end
+
     success = true
-    try
-        # now start executing tasks of the pending result in a loop
-        success = pending_execute_tasks(pending)
-    catch ex
-        cleanup_tasks(tasks, task_state)
-        throw(ex)
+    if Threads.nthreads() == 1
+        success = execute_singlethreaded(pending)
+        # check if an error was thrown
+        if !success
+            throw(QueryException(get_error(stmt, pending)))
+        end
+    else
+        execute_multithreaded(stmt, pending)
     end
 
-    # we finished execution of all tasks, cleanup the tasks
-    cleanup_tasks(tasks, task_state)
-    # check if an error was thrown
-    if !success
-        throw(QueryException(get_error(stmt, pending)))
-    end
     handle = Ref{duckdb_result}()
     ret = duckdb_execute_pending(pending.handle, handle)
     if ret != DuckDBSuccess
         error_ptr = duckdb_result_error(handle)
-        error_message = fetch_error(stmt, error_ptr)
+        error_message = fetch_error(stmt.sql, error_ptr)
         duckdb_destroy_result(handle)
         throw(QueryException(error_message))
     end
@@ -621,12 +810,10 @@ function execute(stmt::Stmt, params::DBInterface.StatementParams = ())
 end
 
 # explicitly close prepared statement
-function DBInterface.close!(stmt::Stmt)
-    return _close_stmt(stmt)
-end
+DBInterface.close!(stmt::Stmt) = _close_stmt(stmt)
 
 function execute(con::Connection, sql::AbstractString, params::DBInterface.StatementParams)
-    stmt = Stmt(con, sql)
+    stmt = Stmt(con, sql, MaterializedResult)
     try
         return execute(stmt, params)
     finally
@@ -638,35 +825,95 @@ execute(con::Connection, sql::AbstractString; kwargs...) = execute(con, sql, val
 execute(db::DB, sql::AbstractString, params::DBInterface.StatementParams) = execute(db.main_connection, sql, params)
 execute(db::DB, sql::AbstractString; kwargs...) = execute(db.main_connection, sql, values(kwargs))
 
+
+Tables.istable(::Type{QueryResult}) = true
 Tables.isrowtable(::Type{QueryResult}) = true
-Tables.columnnames(q::QueryResult) = Tables.columnnames(q.df)
-
-function Tables.schema(q::QueryResult)
-    return Tables.schema(q.df)
-end
-
+Tables.columnaccess(::Type{QueryResult}) = true
+Tables.schema(q::QueryResult) = Tables.Schema(q.names, q.types)
 Base.IteratorSize(::Type{QueryResult}) = Base.SizeUnknown()
 Base.eltype(q::QueryResult) = Any
 
-function DBInterface.close!(q::QueryResult)
-    return _close_result(q)
+DBInterface.close!(q::QueryResult) = _close_result(q)
+
+Base.iterate(q::QueryResult) = iterate(Tables.rows(Tables.columns(q)))
+Base.iterate(q::QueryResult, state) = iterate(Tables.rows(Tables.columns(q)), state)
+
+struct QueryResultChunk
+    tbl::NamedTuple
 end
 
-function Base.iterate(q::QueryResult)
-    return Base.iterate(eachrow(q.df))
+function Tables.columns(chunk::QueryResultChunk)
+    return Tables.CopiedColumns(chunk.tbl)
 end
 
-function Base.iterate(q::QueryResult, state)
-    return Base.iterate(eachrow(q.df), state)
+Tables.istable(::Type{QueryResultChunk}) = true
+Tables.isrowtable(::Type{QueryResultChunk}) = true
+Tables.columnaccess(::Type{QueryResultChunk}) = true
+Tables.schema(chunk::QueryResultChunk) = Tables.Schema(chunk.q.names, chunk.q.types)
+
+struct QueryResultChunkIterator
+    q::QueryResult
+    column_count::Int64
 end
 
-DataFrames.DataFrame(q::QueryResult) = DataFrame(q.df)
+function next_chunk(iter::QueryResultChunkIterator)
+    chunk = DuckDB.nextDataChunk(iter.q)
+    if chunk === missing
+        return nothing
+    end
+
+    return QueryResultChunk(convert_columns(iter.q, (chunk,), iter.column_count))
+end
+
+Base.iterate(iter::QueryResultChunkIterator) = iterate(iter, 0x0000000000000001)
+
+function Base.iterate(iter::QueryResultChunkIterator, state)
+    if iter.q.chunk_index != state
+        throw(
+            NotImplementedException(
+                "Iterating chunks more than once is not supported. " *
+                "(Did you iterate the result of Tables.partitions() once already, call nextDataChunk or materialise QueryResult?)"
+            )
+        )
+    end
+    chunk = next_chunk(iter)
+    if chunk === nothing
+        return nothing
+    end
+    return (chunk, state + 1)
+end
+
+Base.IteratorSize(::Type{QueryResultChunkIterator}) = Base.SizeUnknown()
+Base.eltype(iter::QueryResultChunkIterator) = Any
+
+function Tables.partitions(q::QueryResult)
+    column_count = duckdb_column_count(q.handle)
+    return QueryResultChunkIterator(q, column_count)
+end
+
+function nextDataChunk(q::QueryResult)::Union{Missing, DataChunk}
+    if duckdb_result_is_streaming(q.handle[])
+        chunk_handle = duckdb_stream_fetch_chunk(q.handle[])
+        if chunk_handle == C_NULL
+            return missing
+        end
+        chunk = DataChunk(chunk_handle, true)
+        if get_size(chunk) == 0
+            return missing
+        end
+    else
+        chunk_count = duckdb_result_chunk_count(q.handle[])
+        if q.chunk_index > chunk_count
+            return missing
+        end
+        chunk = DataChunk(duckdb_result_get_chunk(q.handle[], q.chunk_index), true)
+    end
+    q.chunk_index += 1
+    return chunk
+end
 
 "Return the last row insert id from the executed statement"
-function DBInterface.lastrowid(con::Connection)
-    throw(NotImplementedException("Unimplemented: lastrowid"))
-end
-
+DBInterface.lastrowid(con::Connection) = throw(NotImplementedException("Unimplemented: lastrowid"))
 DBInterface.lastrowid(db::DB) = DBInterface.lastrowid(db.main_connection)
 
 """
@@ -676,8 +923,11 @@ Prepare an SQL statement given as a string in the DuckDB database; returns a `Du
 See `DBInterface.execute`(@ref) for information on executing a prepared statement and passing parameters to bind.
 A `DuckDB.Stmt` object can be closed (resources freed) using `DBInterface.close!`(@ref).
 """
-DBInterface.prepare(con::Connection, sql::AbstractString) = Stmt(con, sql)
+DBInterface.prepare(con::Connection, sql::AbstractString, result_type::Type) = Stmt(con, sql, result_type)
+DBInterface.prepare(con::Connection, sql::AbstractString) = DBInterface.prepare(con, sql, MaterializedResult)
 DBInterface.prepare(db::DB, sql::AbstractString) = DBInterface.prepare(db.main_connection, sql)
+DBInterface.prepare(db::DB, sql::AbstractString, result_type::Type) =
+    DBInterface.prepare(db.main_connection, sql, result_type)
 
 """
     DBInterface.execute(db::DuckDB.DB, sql::String, [params])
@@ -692,12 +942,35 @@ Calling `SQLite.reset!(result)` will re-execute the query and reset the iterator
 The resultset iterator supports the [Tables.jl](https://github.com/JuliaData/Tables.jl) interface, so results can be collected in any Tables.jl-compatible sink,
 like `DataFrame(results)`, `CSV.write("results.csv", results)`, etc.
 """
-function DBInterface.execute(stmt::Stmt, params::DBInterface.StatementParams)
-    return execute(stmt, params)
+DBInterface.execute(stmt::Stmt, params::DBInterface.StatementParams) = execute(stmt, params)
+function DBInterface.execute(con::Connection, sql::AbstractString, result_type::Type)
+    stmt = Stmt(con, sql, result_type)
+    try
+        return execute(stmt)
+    finally
+        _close_stmt(stmt) # immediately close, don't wait for GC
+    end
 end
+DBInterface.execute(con::Connection, sql::AbstractString) = DBInterface.execute(con, sql, MaterializedResult)
+DBInterface.execute(db::DB, sql::AbstractString, result_type::Type) =
+    DBInterface.execute(db.main_connection, sql, result_type)
 
-function DBInterface.execute(con::Connection, sql::AbstractString)
-    return execute(Stmt(con, sql))
+Base.show(io::IO, result::DuckDB.QueryResult) = print(io, Tables.columntable(result))
+
+"""
+Executes a SQL query within a connection and returns the full (materialized) result. 
+
+The query function is able to run queries with multiple statements, unlike `DBInterface.execute`(@ref) which is only able to prepare a single statement.
+"""
+function query(con::DuckDB.Connection, sql::AbstractString)
+    handle = Ref{duckdb_result}()
+    ret = duckdb_query(con.handle, sql, handle)
+    if ret != DuckDBSuccess
+        error_ptr = duckdb_result_error(handle)
+        error_message = fetch_error(sql, error_ptr)
+        duckdb_destroy_result(handle)
+        throw(QueryException(error_message))
+    end
+    return QueryResult(handle)
 end
-
-Base.show(io::IO, result::DuckDB.QueryResult) = print(io, result.df)
+query(db::DuckDB.DB, sql::AbstractString) = query(db.main_connection, sql)

@@ -7,6 +7,8 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/main/query_result.hpp"
 
 #include <set>
 
@@ -16,30 +18,39 @@ struct DuckDBColumnsData : public GlobalTableFunctionState {
 	DuckDBColumnsData() : offset(0), column_offset(0) {
 	}
 
-	vector<CatalogEntry *> entries;
+	vector<reference<CatalogEntry>> entries;
 	idx_t offset;
 	idx_t column_offset;
 };
 
 static unique_ptr<FunctionData> DuckDBColumnsBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<string> &names) {
-	names.emplace_back("schema_oid");
+	names.emplace_back("database_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("database_oid");
 	return_types.emplace_back(LogicalType::BIGINT);
 
 	names.emplace_back("schema_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
-	names.emplace_back("table_oid");
+	names.emplace_back("schema_oid");
 	return_types.emplace_back(LogicalType::BIGINT);
 
 	names.emplace_back("table_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("table_oid");
+	return_types.emplace_back(LogicalType::BIGINT);
 
 	names.emplace_back("column_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
 	names.emplace_back("column_index");
 	return_types.emplace_back(LogicalType::INTEGER);
+
+	names.emplace_back("comment");
+	return_types.emplace_back(LogicalType::VARCHAR);
 
 	names.emplace_back("internal");
 	return_types.emplace_back(LogicalType::BOOLEAN);
@@ -68,96 +79,142 @@ static unique_ptr<FunctionData> DuckDBColumnsBind(ClientContext &context, TableF
 	names.emplace_back("numeric_scale");
 	return_types.emplace_back(LogicalType::INTEGER);
 
+	names.emplace_back("tags");
+	return_types.emplace_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+
+	names.emplace_back("is_generated");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+
+	names.emplace_back("generation_expression");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
 	return nullptr;
 }
 
-unique_ptr<GlobalTableFunctionState> DuckDBColumnsInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto result = make_unique<DuckDBColumnsData>();
+static unique_ptr<GlobalTableFunctionState> DuckDBColumnsInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto result = make_uniq<DuckDBColumnsData>();
 
 	// scan all the schemas for tables and views and collect them
-	auto schemas = Catalog::GetCatalog(context).schemas->GetEntries<SchemaCatalogEntry>(context);
+	auto schemas = Catalog::GetAllSchemas(context);
 	for (auto &schema : schemas) {
-		schema->Scan(context, CatalogType::TABLE_ENTRY, [&](CatalogEntry *entry) { result->entries.push_back(entry); });
+		schema.get().Scan(context, CatalogType::TABLE_ENTRY,
+		                  [&](CatalogEntry &entry) { result->entries.push_back(entry); });
 	}
-
-	// check the temp schema as well
-	SchemaCatalogEntry::GetTemporaryObjects(context)->Scan(
-	    context, CatalogType::TABLE_ENTRY, [&](CatalogEntry *entry) { result->entries.push_back(entry); });
-	return move(result);
+	return std::move(result);
 }
 
 class ColumnHelper {
 public:
-	static unique_ptr<ColumnHelper> Create(CatalogEntry *entry);
+	static unique_ptr<ColumnHelper> Create(ClientContext &context, CatalogEntry &entry);
 
 	virtual ~ColumnHelper() {
 	}
 
-	virtual StandardEntry *Entry() = 0;
+	virtual StandardEntry &Entry() = 0;
 	virtual idx_t NumColumns() = 0;
-	virtual const string &ColumnName(idx_t col) = 0;
+	virtual Value ColumnName(idx_t col) = 0;
 	virtual const LogicalType &ColumnType(idx_t col) = 0;
 	virtual const Value ColumnDefault(idx_t col) = 0;
 	virtual bool IsNullable(idx_t col) = 0;
+	virtual const Value ColumnComment(idx_t col) = 0;
+	virtual const Value ColumnTags(idx_t col) = 0;
+	virtual bool IsGenerated(idx_t col) = 0;
+	virtual const Value GenerationExpression(idx_t col) = 0;
 
-	void WriteColumns(idx_t index, idx_t start_col, idx_t end_col, DataChunk &output);
+	void WriteColumns(idx_t start_col, idx_t end_col, DataChunk &output);
 };
 
 class TableColumnHelper : public ColumnHelper {
 public:
-	explicit TableColumnHelper(TableCatalogEntry *entry) : entry(entry) {
-		for (auto &constraint : entry->constraints) {
+	explicit TableColumnHelper(TableCatalogEntry &entry) : entry(entry) {
+		for (auto &constraint : entry.GetConstraints()) {
 			if (constraint->type == ConstraintType::NOT_NULL) {
-				auto &not_null = *reinterpret_cast<NotNullConstraint *>(constraint.get());
+				auto &not_null = constraint->Cast<NotNullConstraint>();
 				not_null_cols.insert(not_null.index.index);
 			}
 		}
 	}
 
-	StandardEntry *Entry() override {
+	StandardEntry &Entry() override {
 		return entry;
 	}
 	idx_t NumColumns() override {
-		return entry->columns.LogicalColumnCount();
+		return entry.GetColumns().LogicalColumnCount();
 	}
-	const string &ColumnName(idx_t col) override {
-		return entry->columns.GetColumn(LogicalIndex(col)).Name();
+	Value ColumnName(idx_t col) override {
+		return Value(entry.GetColumn(LogicalIndex(col)).Name());
 	}
 	const LogicalType &ColumnType(idx_t col) override {
-		return entry->columns.GetColumn(LogicalIndex(col)).Type();
+		return entry.GetColumn(LogicalIndex(col)).Type();
 	}
 	const Value ColumnDefault(idx_t col) override {
-		auto &column = entry->columns.GetColumn(LogicalIndex(col));
-		if (column.DefaultValue()) {
-			return Value(column.DefaultValue()->ToString());
+		auto &column = entry.GetColumn(LogicalIndex(col));
+		if (column.Generated()) {
+			return Value(column.GeneratedExpression().ToString());
+		} else if (column.HasDefaultValue()) {
+			return Value(column.DefaultValue().ToString());
 		}
 		return Value();
 	}
 	bool IsNullable(idx_t col) override {
 		return not_null_cols.find(col) == not_null_cols.end();
 	}
+	const Value ColumnComment(idx_t col) override {
+		return entry.GetColumn(LogicalIndex(col)).Comment();
+	}
+	const Value ColumnTags(idx_t col) override {
+		return Value::MAP(entry.GetColumn(LogicalIndex(col)).Tags());
+	}
+	bool IsGenerated(idx_t col) override {
+		return entry.GetColumn(LogicalIndex(col)).Generated();
+	}
+	const Value GenerationExpression(idx_t col) override {
+		auto &column = entry.GetColumn(LogicalIndex(col));
+		if (!column.Generated()) {
+			return Value();
+		}
+		return Value(column.GeneratedExpression().ToString());
+	}
 
 private:
-	TableCatalogEntry *entry;
+	TableCatalogEntry &entry;
 	std::set<idx_t> not_null_cols;
 };
 
 class ViewColumnHelper : public ColumnHelper {
 public:
-	explicit ViewColumnHelper(ViewCatalogEntry *entry) : entry(entry) {
+	explicit ViewColumnHelper(ClientContext &context, ViewCatalogEntry &entry) : entry(entry) {
+		try {
+			// try to bind the view if it is not yet bound
+			entry.BindView(context);
+		} catch (std::exception &ex) {
+		}
+		auto view_columns = entry.GetColumnInfo();
+		if (view_columns) {
+			column_names = view_columns->names;
+			types = view_columns->types;
+			QueryResult::DeduplicateColumns(column_names);
+			bound_view = true;
+		} else {
+			// view is not bound - emit a single placeholder column
+			types.push_back(LogicalTypeId::INVALID);
+		}
 	}
 
-	StandardEntry *Entry() override {
+	StandardEntry &Entry() override {
 		return entry;
 	}
 	idx_t NumColumns() override {
-		return entry->types.size();
+		return types.size();
 	}
-	const string &ColumnName(idx_t col) override {
-		return entry->aliases[col];
+	Value ColumnName(idx_t col) override {
+		if (types[0].id() == LogicalTypeId::INVALID) {
+			return Value();
+		}
+		return Value(col < entry.aliases.size() ? entry.aliases[col] : column_names[col]);
 	}
 	const LogicalType &ColumnType(idx_t col) override {
-		return entry->types[col];
+		return types[col];
 	}
 	const Value ColumnDefault(idx_t col) override {
 		return Value();
@@ -165,58 +222,103 @@ public:
 	bool IsNullable(idx_t col) override {
 		return true;
 	}
+	const Value ColumnComment(idx_t col) override {
+		return bound_view ? entry.GetColumnComment(col) : Value();
+	}
+	const Value ColumnTags(idx_t col) override {
+		InsertionOrderPreservingMap<string> empty;
+		return Value::MAP(empty);
+	}
+	bool IsGenerated(idx_t col) override {
+		return false;
+	}
+	const Value GenerationExpression(idx_t col) override {
+		return Value();
+	}
 
 private:
-	ViewCatalogEntry *entry;
+	ViewCatalogEntry &entry;
+	vector<Identifier> column_names;
+	vector<LogicalType> types;
+	bool bound_view = false;
 };
 
-unique_ptr<ColumnHelper> ColumnHelper::Create(CatalogEntry *entry) {
-	switch (entry->type) {
+unique_ptr<ColumnHelper> ColumnHelper::Create(ClientContext &context, CatalogEntry &entry) {
+	switch (entry.type) {
 	case CatalogType::TABLE_ENTRY:
-		return make_unique<TableColumnHelper>((TableCatalogEntry *)entry);
+		return make_uniq<TableColumnHelper>(entry.Cast<TableCatalogEntry>());
 	case CatalogType::VIEW_ENTRY:
-		return make_unique<ViewColumnHelper>((ViewCatalogEntry *)entry);
+		return make_uniq<ViewColumnHelper>(context, entry.Cast<ViewCatalogEntry>());
 	default:
-		throw NotImplementedException("Unsupported catalog type for duckdb_columns");
+		throw NotImplementedException({{"catalog_type", CatalogTypeToString(entry.type)}},
+		                              "Unsupported catalog type for duckdb_columns");
 	}
 }
 
-void ColumnHelper::WriteColumns(idx_t start_index, idx_t start_col, idx_t end_col, DataChunk &output) {
-	for (idx_t i = start_col; i < end_col; i++) {
-		auto index = start_index + (i - start_col);
-		auto &entry = *Entry();
+void ColumnHelper::WriteColumns(idx_t start_col, idx_t end_col, DataChunk &output) {
+	// database_name, VARCHAR
+	auto &database_name = output.data[0];
+	// database_oid, BIGINT
+	auto &database_oid = output.data[1];
+	// schema_name, VARCHAR
+	auto &schema_name = output.data[2];
+	// schema_oid, BIGINT
+	auto &schema_oid = output.data[3];
+	// table_name, VARCHAR
+	auto &table_name = output.data[4];
+	// table_oid, BIGINT
+	auto &table_oid = output.data[5];
+	// column_name, VARCHAR
+	auto &column_name = output.data[6];
+	// column_index, INTEGER
+	auto &column_index = output.data[7];
+	// comment, VARCHAR
+	auto &comment = output.data[8];
+	// internal, BOOLEAN
+	auto &internal = output.data[9];
+	// column_default, VARCHAR
+	auto &column_default = output.data[10];
+	// is_nullable, BOOLEAN
+	auto &is_nullable = output.data[11];
+	// data_type, VARCHAR
+	auto &data_type = output.data[12];
+	// data_type_id, BIGINT
+	auto &data_type_id = output.data[13];
+	// character_maximum_length, INTEGER
+	auto &character_maximum_length = output.data[14];
+	// numeric_precision, INTEGER
+	auto &numeric_precision_col = output.data[15];
+	// numeric_precision_radix, INTEGER
+	auto &numeric_precision_radix_col = output.data[16];
+	// numeric_scale, INTEGER
+	auto &numeric_scale_col = output.data[17];
+	// tags, MAP(VARCHAR, VARCHAR)
+	auto &tags = output.data[18];
+	// is_generated, BOOLEAN
+	auto &is_generated = output.data[19];
+	// generation_expression, VARCHAR
+	auto &generation_expression = output.data[20];
 
-		// schema_oid, BIGINT
-		output.SetValue(0, index, Value::BIGINT(entry.schema->oid));
-		// schema_name, VARCHAR
-		output.SetValue(1, index, entry.schema->name);
-		// table_oid, BIGINT
-		output.SetValue(2, index, Value::BIGINT(entry.oid));
-		// table_name, VARCHAR
-		output.SetValue(3, index, entry.name);
-		// column_name, VARCHAR
-		output.SetValue(4, index, Value(ColumnName(i)));
-		// column_index, INTEGER
-		output.SetValue(5, index, Value::INTEGER(i + 1));
-		// internal, BOOLEAN
-		output.SetValue(6, index, Value::BOOLEAN(entry.internal));
-		// column_default, VARCHAR
-		output.SetValue(7, index, Value(ColumnDefault(i)));
-		// is_nullable, BOOLEAN
-		output.SetValue(8, index, Value::BOOLEAN(IsNullable(i)));
-		// data_type, VARCHAR
+	for (idx_t i = start_col; i < end_col; i++) {
+		auto &entry = Entry();
+
+		database_name.Append(Value(entry.catalog.GetName()));
+		database_oid.Append(Value::BIGINT(NumericCast<int64_t>(entry.catalog.GetOid())));
+		schema_name.Append(Value(entry.schema.name));
+		schema_oid.Append(Value::BIGINT(NumericCast<int64_t>(entry.schema.oid)));
+		table_name.Append(Value(entry.name));
+		table_oid.Append(Value::BIGINT(NumericCast<int64_t>(entry.oid)));
+		column_name.Append(ColumnName(i));
+		column_index.Append(Value::INTEGER(UnsafeNumericCast<int32_t>(i + 1)));
+		comment.Append(ColumnComment(i));
+		internal.Append(Value::BOOLEAN(entry.internal));
+		column_default.Append(ColumnDefault(i));
+		is_nullable.Append(Value::BOOLEAN(IsNullable(i)));
 		const LogicalType &type = ColumnType(i);
-		output.SetValue(9, index, Value(type.ToString()));
-		// data_type_id, BIGINT
-		output.SetValue(10, index, Value::BIGINT(int(type.id())));
-		if (type == LogicalType::VARCHAR) {
-			// FIXME: need check constraints in place to set this correctly
-			// character_maximum_length, INTEGER
-			output.SetValue(11, index, Value());
-		} else {
-			// "character_maximum_length", PhysicalType::INTEGER
-			output.SetValue(11, index, Value());
-		}
+		data_type.Append(type.id() == LogicalTypeId::INVALID ? Value() : Value(type.ToString()));
+		data_type_id.Append(type.id() == LogicalTypeId::INVALID ? Value() : Value::BIGINT(int(type.id())));
+		// FIXME: need check constraints in place to set this correctly for VARCHAR
+		character_maximum_length.Append(Value());
 
 		Value numeric_precision, numeric_scale, numeric_precision_radix;
 		switch (type.id()) {
@@ -267,17 +369,17 @@ void ColumnHelper::WriteColumns(idx_t start_index, idx_t start_col, idx_t end_co
 			break;
 		}
 
-		// numeric_precision, INTEGER
-		output.SetValue(12, index, numeric_precision);
-		// numeric_precision_radix, INTEGER
-		output.SetValue(13, index, numeric_precision_radix);
-		// numeric_scale, INTEGER
-		output.SetValue(14, index, numeric_scale);
+		numeric_precision_col.Append(numeric_precision);
+		numeric_precision_radix_col.Append(numeric_precision_radix);
+		numeric_scale_col.Append(numeric_scale);
+		tags.Append(ColumnTags(i));
+		is_generated.Append(Value::BOOLEAN(IsGenerated(i)));
+		generation_expression.Append(GenerationExpression(i));
 	}
 }
 
-void DuckDBColumnsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = (DuckDBColumnsData &)*data_p.global_state;
+static void DuckDBColumnsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.global_state->Cast<DuckDBColumnsData>();
 	if (data.offset >= data.entries.size()) {
 		// finished returning values
 		return;
@@ -291,14 +393,13 @@ void DuckDBColumnsFunction(ClientContext &context, TableFunctionInput &data_p, D
 	idx_t column_offset = data.column_offset;
 	idx_t index = 0;
 	while (next < data.entries.size() && index < STANDARD_VECTOR_SIZE) {
-		auto column_helper = ColumnHelper::Create(data.entries[next]);
+		auto column_helper = ColumnHelper::Create(context, data.entries[next].get());
 		idx_t columns = column_helper->NumColumns();
 
 		// Check to see if we are going to exceed the maximum index for a DataChunk
 		if (index + (columns - column_offset) > STANDARD_VECTOR_SIZE) {
 			idx_t column_limit = column_offset + (STANDARD_VECTOR_SIZE - index);
-			output.SetCardinality(STANDARD_VECTOR_SIZE);
-			column_helper->WriteColumns(index, column_offset, column_limit, output);
+			column_helper->WriteColumns(column_offset, column_limit, output);
 
 			// Make the current column limit the column offset when we process the next chunk
 			column_offset = column_limit;
@@ -306,13 +407,13 @@ void DuckDBColumnsFunction(ClientContext &context, TableFunctionInput &data_p, D
 		} else {
 			// Otherwise, write all of the columns from the current relation and
 			// then move on to the next one.
-			output.SetCardinality(index + (columns - column_offset));
-			column_helper->WriteColumns(index, column_offset, columns, output);
+			column_helper->WriteColumns(column_offset, columns, output);
 			index += columns - column_offset;
 			next++;
 			column_offset = 0;
 		}
 	}
+	// WriteColumns appends to the child vectors - record the resulting cardinality on the chunk
 	data.offset = next;
 	data.column_offset = column_offset;
 }

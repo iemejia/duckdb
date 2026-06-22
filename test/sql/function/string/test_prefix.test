@@ -3,7 +3,7 @@
 # group: [string]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 # "Early out prefix"
 query T

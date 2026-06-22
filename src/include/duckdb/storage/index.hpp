@@ -8,130 +8,95 @@
 
 #pragma once
 
+#include "duckdb/common/enums/index_constraint_type.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_set.hpp"
-#include "duckdb/common/enums/index_type.hpp"
-#include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/common/sort/sort.hpp"
-#include "duckdb/parser/parsed_expression.hpp"
-#include "duckdb/planner/expression.hpp"
-#include "duckdb/storage/table/scan_state.hpp"
-#include "duckdb/storage/meta_block_writer.hpp"
-#include "duckdb/execution/expression_executor.hpp"
 
 namespace duckdb {
 
-class ClientContext;
+class AttachedDatabase;
 class TableIOManager;
-class Transaction;
-
-struct IndexLock;
 
 //! The index is an abstract base class that serves as the basis for indexes
 class Index {
-public:
-	Index(IndexType type, TableIOManager &table_io_manager, const vector<column_t> &column_ids,
-	      const vector<unique_ptr<Expression>> &unbound_expressions, IndexConstraintType constraint_type);
-	virtual ~Index() = default;
+protected:
+	Index(const vector<column_t> &column_ids, TableIOManager &table_io_manager, AttachedDatabase &db);
 
-	//! The type of the index
-	IndexType type;
+	//! The physical column ids of the indexed columns.
+	//! For example, given a table with the following columns:
+	//! (a INT, gen AS (2 * a), b INT, c VARCHAR), an index on columns (a,c) would have physical
+	//! column_ids [0,2] (since the virtual column is skipped in the physical representation).
+	//! Also see comments in bound_index.hpp to see how these column IDs are used in the context of
+	//! bound/unbound expressions.
+	//! Note that these are the columns for this Index, not all Indexes on the table.
+	vector<column_t> column_ids;
+	//! Unordered set of column_ids used by the Index
+	unordered_set<column_t> column_id_set;
+
+public:
 	//! Associated table io manager
 	TableIOManager &table_io_manager;
-	//! Column identifiers to extract from the base table
-	vector<column_t> column_ids;
-	//! unordered_set of column_ids used by the index
-	unordered_set<column_t> column_id_set;
-	//! Unbound expressions used by the index
-	vector<unique_ptr<Expression>> unbound_expressions;
-	//! The physical types stored in the index
-	vector<PhysicalType> types;
-	//! The logical types of the expressions
-	vector<LogicalType> logical_types;
-	//! constraint type
-	IndexConstraintType constraint_type;
+	//! Attached database instance
+	AttachedDatabase &db;
 
 public:
-	//! Initialize a scan on the index with the given expression and column ids
-	//! to fetch from the base table when we only have one query predicate
-	virtual unique_ptr<IndexScanState> InitializeScanSinglePredicate(Transaction &transaction, Value value,
-	                                                                 ExpressionType expressionType) = 0;
-	//! Initialize a scan on the index with the given expression and column ids
-	//! to fetch from the base table for two query predicates
-	virtual unique_ptr<IndexScanState> InitializeScanTwoPredicates(Transaction &transaction, Value low_value,
-	                                                               ExpressionType low_expression_type, Value high_value,
-	                                                               ExpressionType high_expression_type) = 0;
-	//! Perform a lookup on the index, fetching up to max_count result ids. Returns true if all row ids were fetched,
-	//! and false otherwise.
-	virtual bool Scan(Transaction &transaction, DataTable &table, IndexScanState &state, idx_t max_count,
-	                  vector<row_t> &result_ids) = 0;
+	virtual ~Index() = default;
 
-	//! Obtain a lock on the index
-	virtual void InitializeLock(IndexLock &state);
-	//! Called when data is appended to the index. The lock obtained from InitializeAppend must be held
-	virtual bool Append(IndexLock &state, DataChunk &entries, Vector &row_identifiers) = 0;
-	bool Append(DataChunk &entries, Vector &row_identifiers);
-	//! Verify that data can be appended to the index
-	virtual void VerifyAppend(DataChunk &chunk) = 0;
-	//! Verify that data can be appended to the index for foreign key constraint
-	virtual void VerifyAppendForeignKey(DataChunk &chunk, string *err_msg_ptr) = 0;
-	//! Verify that data can be delete from the index for foreign key constraint
-	virtual void VerifyDeleteForeignKey(DataChunk &chunk, string *err_msg_ptr) = 0;
+	//! Returns true if the index is a bound index, and false otherwise
+	virtual bool IsBound() const = 0;
 
-	//! Called when data inside the index is Deleted
-	virtual void Delete(IndexLock &state, DataChunk &entries, Vector &row_identifiers) = 0;
-	void Delete(DataChunk &entries, Vector &row_identifiers);
+	//! The index type (ART, B+-tree, Skip-List, ...)
+	virtual const string &GetIndexType() const = 0;
 
-	//! Insert data into the index. Does not lock the index.
-	virtual bool Insert(IndexLock &lock, DataChunk &input, Vector &row_identifiers) = 0;
-	//! Construct an index from sorted chunks of keys.
-	virtual void ConstructAndMerge(IndexLock &lock, PayloadScanner &scanner, Allocator &allocator) = 0;
+	//! The name of the index
+	virtual const Identifier &GetIndexName() const = 0;
 
-	//! Merge other_index into this index.
-	virtual bool MergeIndexes(IndexLock &state, Index *other_index) = 0;
-	bool MergeIndexes(Index *other_index);
-
-	//! Returns the string representation of an index
-	virtual string ToString() = 0;
-
-	//! Returns true if the index is affected by updates on the specified column ids, and false otherwise
-	bool IndexIsUpdated(const vector<PhysicalIndex> &column_ids) const;
+	//! The index constraint type
+	virtual IndexConstraintType GetConstraintType() const = 0;
 
 	//! Returns unique flag
-	bool IsUnique() {
-		return (constraint_type == IndexConstraintType::UNIQUE || constraint_type == IndexConstraintType::PRIMARY);
-	}
-	//! Returns primary flag
-	bool IsPrimary() {
-		return (constraint_type == IndexConstraintType::PRIMARY);
-	}
-	//! Returns foreign flag
-	bool IsForeign() {
-		return (constraint_type == IndexConstraintType::FOREIGN);
-	}
-	//! Serializes the index and returns the pair of block_id offset positions
-	virtual BlockPointer Serialize(duckdb::MetaBlockWriter &writer);
-
-	//! Returns block/offset of where index was most recently serialized.
-	BlockPointer GetSerializedDataPointer() const {
-		return serialized_data_pointer;
+	bool IsUnique() const {
+		auto type = GetConstraintType();
+		return type == IndexConstraintType::UNIQUE || type == IndexConstraintType::PRIMARY;
 	}
 
-protected:
-	void ExecuteExpressions(DataChunk &input, DataChunk &result);
+	//! Returns primary key flag
+	bool IsPrimary() const {
+		auto index_constraint_type = GetConstraintType();
+		return (index_constraint_type == IndexConstraintType::PRIMARY);
+	}
 
-	//! Lock used for updating the index
-	mutex lock;
+	//! Returns foreign key flag
+	bool IsForeign() const {
+		auto index_constraint_type = GetConstraintType();
+		return (index_constraint_type == IndexConstraintType::FOREIGN);
+	}
 
-	//! Pointer to most recently checkpointed index data.
-	BlockPointer serialized_data_pointer;
+	const vector<column_t> &GetColumnIds() const {
+		return column_ids;
+	}
 
-private:
-	//! Bound expressions used by the index
-	vector<unique_ptr<Expression>> bound_expressions;
-	//! Expression executor for the index expressions
-	ExpressionExecutor executor;
+	const unordered_set<column_t> &GetColumnIdSet() const {
+		return column_id_set;
+	}
 
-	unique_ptr<Expression> BindExpression(unique_ptr<Expression> expr);
+	virtual void ResetStorage() = 0;
+
+public:
+	template <class TARGET>
+	TARGET &Cast() {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<TARGET &>(*this);
+	}
+
+	template <class TARGET>
+	const TARGET &Cast() const {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<const TARGET &>(*this);
+	}
 };
 
 } // namespace duckdb

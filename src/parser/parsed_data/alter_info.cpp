@@ -1,46 +1,52 @@
 #include "duckdb/parser/parsed_data/alter_info.hpp"
-#include "duckdb/parser/parsed_data/alter_table_info.hpp"
-#include "duckdb/parser/parsed_data/alter_function_info.hpp"
 
-#include "duckdb/common/field_writer.hpp"
+#include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 
 namespace duckdb {
 
-AlterInfo::AlterInfo(AlterType type, string schema_p, string name_p, bool if_exists)
-    : type(type), if_exists(if_exists), schema(move(schema_p)), name(move(name_p)) {
+AlterInfo::AlterInfo(AlterType type, Identifier catalog_p, Identifier schema_p, Identifier name_p,
+                     OnEntryNotFound if_not_found)
+    : ParseInfo(TYPE), type(type), if_not_found(if_not_found), catalog(std::move(catalog_p)),
+      schema(std::move(schema_p)), name(std::move(name_p)), allow_internal(false) {
+}
+
+AlterInfo::AlterInfo(AlterType type) : ParseInfo(TYPE), type(type) {
 }
 
 AlterInfo::~AlterInfo() {
 }
 
-void AlterInfo::Serialize(Serializer &serializer) const {
-	FieldWriter writer(serializer);
-	writer.WriteField<AlterType>(type);
-	Serialize(writer);
-	writer.Finalize();
+AlterEntryData AlterInfo::GetAlterEntryData() const {
+	AlterEntryData data;
+	data.catalog = catalog;
+	data.schema = schema;
+	data.name = name;
+	data.if_not_found = if_not_found;
+	return data;
 }
 
-unique_ptr<AlterInfo> AlterInfo::Deserialize(Deserializer &source) {
-	FieldReader reader(source);
-	auto type = reader.ReadRequired<AlterType>();
-
-	unique_ptr<AlterInfo> result;
-	switch (type) {
-	case AlterType::ALTER_TABLE:
-		result = AlterTableInfo::Deserialize(reader);
-		break;
-	case AlterType::ALTER_VIEW:
-		result = AlterViewInfo::Deserialize(reader);
-		break;
-	case AlterType::ALTER_FUNCTION:
-		result = AlterFunctionInfo::Deserialize(reader);
-		break;
-	default:
-		throw SerializationException("Unknown alter type for deserialization!");
+bool AlterInfo::IsAddPrimaryKey() const {
+	if (type != AlterType::ALTER_TABLE) {
+		return false;
 	}
-	reader.Finalize();
 
-	return result;
+	auto &table_info = Cast<AlterTableInfo>();
+	if (table_info.alter_table_type != AlterTableType::ADD_CONSTRAINT) {
+		return false;
+	}
+
+	auto &constraint_info = table_info.Cast<AddConstraintInfo>();
+	if (constraint_info.constraint->type != ConstraintType::UNIQUE) {
+		return false;
+	}
+
+	auto &unique_info = constraint_info.constraint->Cast<UniqueConstraint>();
+	if (!unique_info.IsPrimaryKey()) {
+		return false;
+	}
+
+	return true;
 }
 
 } // namespace duckdb

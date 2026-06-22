@@ -4,11 +4,10 @@
 #include "duckdb/main/appender.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 TEST_CASE("Test interleaving of insertions/updates/deletes on multiple tables", "[storage][.]") {
 	auto config = GetTestConfig();
-	unique_ptr<QueryResult> result;
+	duckdb::unique_ptr<QueryResult> result;
 	auto storage_database = TestCreatePath("storage_test");
 
 	// make sure the database does not exist

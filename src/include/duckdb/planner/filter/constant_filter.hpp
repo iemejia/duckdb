@@ -14,9 +14,13 @@
 
 namespace duckdb {
 
-class ConstantFilter : public TableFilter {
+//! DEPRECATED - only preserved for backwards-compatible deserialization and expression conversion
+class LegacyConstantFilter : public TableFilter {
 public:
-	ConstantFilter(ExpressionType comparison_type, Value constant);
+	static constexpr const TableFilterType TYPE = TableFilterType::LEGACY_CONSTANT_COMPARISON;
+
+public:
+	LegacyConstantFilter(ExpressionType comparison_type, Value constant);
 
 	//! The comparison type (e.g. COMPARE_EQUAL, COMPARE_GREATERTHAN, COMPARE_LESSTHAN, ...)
 	ExpressionType comparison_type;
@@ -24,11 +28,9 @@ public:
 	Value constant;
 
 public:
-	FilterPropagateResult CheckStatistics(BaseStatistics &stats) override;
-	string ToString(const string &column_name) override;
-	bool Equals(const TableFilter &other) const override;
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<TableFilter> Deserialize(FieldReader &source);
+	unique_ptr<Expression> ToExpression(const Expression &column) const override;
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<TableFilter> Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

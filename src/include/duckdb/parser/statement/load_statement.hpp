@@ -15,6 +15,9 @@ namespace duckdb {
 
 class LoadStatement : public SQLStatement {
 public:
+	static constexpr const StatementType TYPE = StatementType::LOAD_STATEMENT;
+
+public:
 	LoadStatement();
 
 protected:
@@ -22,6 +25,7 @@ protected:
 
 public:
 	unique_ptr<SQLStatement> Copy() const override;
+	string ToString() const override;
 
 	unique_ptr<LoadInfo> info;
 };

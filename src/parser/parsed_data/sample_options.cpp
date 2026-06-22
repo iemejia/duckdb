@@ -1,50 +1,37 @@
 #include "duckdb/parser/parsed_data/sample_options.hpp"
-#include "duckdb/common/field_writer.hpp"
+#include "duckdb/common/enum_util.hpp"
+#include "duckdb/common/to_string.hpp"
 
 namespace duckdb {
 
+// **DEPRECATED**: Use EnumUtil directly instead.
 string SampleMethodToString(SampleMethod method) {
-	switch (method) {
-	case SampleMethod::SYSTEM_SAMPLE:
-		return "System";
-	case SampleMethod::BERNOULLI_SAMPLE:
-		return "Bernoulli";
-	case SampleMethod::RESERVOIR_SAMPLE:
-		return "Reservoir";
-	default:
-		return "Unknown";
+	return EnumUtil::ToString(method);
+}
+
+SampleOptions::SampleOptions(int64_t seed_) {
+	repeatable = false;
+	if (seed_ >= 0) {
+		seed = static_cast<idx_t>(seed_);
 	}
-}
-
-void SampleOptions::Serialize(Serializer &serializer) {
-	FieldWriter writer(serializer);
-	writer.WriteSerializable(sample_size);
-	writer.WriteField<bool>(is_percentage);
-	writer.WriteField<SampleMethod>(method);
-	writer.WriteField<int64_t>(seed);
-	writer.Finalize();
-}
-
-unique_ptr<SampleOptions> SampleOptions::Deserialize(Deserializer &source) {
-	auto result = make_unique<SampleOptions>();
-
-	FieldReader reader(source);
-	result->sample_size = reader.ReadRequiredSerializable<Value, Value>();
-	result->is_percentage = reader.ReadRequired<bool>();
-	result->method = reader.ReadRequired<SampleMethod>();
-	result->seed = reader.ReadRequired<int64_t>();
-	reader.Finalize();
-
-	return result;
+	sample_size = 0;
+	is_percentage = false;
+	method = SampleMethod::INVALID;
 }
 
 unique_ptr<SampleOptions> SampleOptions::Copy() {
-	auto result = make_unique<SampleOptions>();
+	auto result = make_uniq<SampleOptions>();
 	result->sample_size = sample_size;
 	result->is_percentage = is_percentage;
 	result->method = method;
 	result->seed = seed;
+	result->repeatable = repeatable;
+	result->sample_rate = sample_rate;
 	return result;
+}
+
+void SampleOptions::SetSeed(idx_t new_seed) {
+	seed = new_seed;
 }
 
 bool SampleOptions::Equals(SampleOptions *a, SampleOptions *b) {
@@ -54,11 +41,26 @@ bool SampleOptions::Equals(SampleOptions *a, SampleOptions *b) {
 	if (!a || !b) {
 		return false;
 	}
+	// if only one is valid, they are not equal
+	if (a->seed.IsValid() != b->seed.IsValid()) {
+		return false;
+	}
+	// if both are invalid, then they are technically the same
+	if (!a->seed.IsValid() && !b->seed.IsValid()) {
+		return true;
+	}
 	if (a->sample_size != b->sample_size || a->is_percentage != b->is_percentage || a->method != b->method ||
-	    a->seed != b->seed) {
+	    a->sample_rate != b->sample_rate || a->seed.GetIndex() != b->seed.GetIndex()) {
 		return false;
 	}
 	return true;
+}
+
+int64_t SampleOptions::GetSeed() const {
+	if (seed.IsValid()) {
+		return static_cast<int64_t>(seed.GetIndex());
+	}
+	return -1;
 }
 
 } // namespace duckdb

@@ -3,7 +3,7 @@
 # group: [view]
 
 statement ok
-PRAGMA enable_verification
+set storage_compatibility_version='v0.10.2'
 
 # create a table
 statement ok
@@ -30,9 +30,9 @@ DROP TABLE t1
 statement ok
 CREATE TABLE t1(i DATE)
 
-# querying the view fails because the column types don't match the expected types
-statement error
+query I
 SELECT * FROM v1
+----
 
 # now drop the table and create one that has extra columns
 statement ok
@@ -42,8 +42,9 @@ statement ok
 CREATE TABLE t1(i INTEGER, j INTEGER)
 
 # again querying the view fails: there are extra columns present
-statement error
+query II
 SELECT * FROM v1
+----
 
 # now drop the table and create one that has differently named columns
 statement ok
@@ -52,9 +53,9 @@ DROP TABLE t1
 statement ok
 CREATE TABLE t1(k INTEGER)
 
-# this is fine: types still match, and the original names will be applied as alias!
+# names returned by the view have changed
 query I
-SELECT i FROM v1
+SELECT * FROM v1
 ----
 
 statement ok
@@ -68,3 +69,26 @@ query I
 SELECT * FROM v1
 ----
 
+# Changing the types of the table that the view references also makes the view unusable
+statement ok
+ALTER TABLE t1 ALTER i TYPE VARCHAR;
+
+query I
+select * from v1;
+----
+
+# reverting the types fixes the issue
+statement ok
+ALTER TABLE t1 ALTER i TYPE INTEGER
+
+query I
+SELECT * FROM v1
+----
+
+# changing the column names makes the view unusable again
+statement ok
+ALTER TABLE t1 RENAME i TO j
+
+query I
+SELECT * FROM v1
+----

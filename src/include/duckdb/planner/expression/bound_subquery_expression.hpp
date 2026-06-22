@@ -17,29 +17,58 @@ namespace duckdb {
 
 class BoundSubqueryExpression : public Expression {
 public:
-	explicit BoundSubqueryExpression(LogicalType return_type);
-
-	bool IsCorrelated() {
-		return binder->correlated_columns.size() > 0;
-	}
-
-	//! The binder used to bind the subquery node
-	shared_ptr<Binder> binder;
-	//! The bound subquery node
-	unique_ptr<BoundQueryNode> subquery;
-	//! The subquery type
-	SubqueryType subquery_type;
-	//! the child expression to compare with (in case of IN, ANY, ALL operators)
-	unique_ptr<Expression> child;
-	//! The comparison type of the child expression with the subquery (in case of ANY, ALL operators)
-	ExpressionType comparison_type;
-	//! The LogicalType of the subquery result. Only used for ANY expressions.
-	LogicalType child_type;
-	//! The target LogicalType of the subquery result (i.e. to which type it should be casted, if child_type <>
-	//! child_target). Only used for ANY expressions.
-	LogicalType child_target;
+	static constexpr const ExpressionClass TYPE = ExpressionClass::BOUND_SUBQUERY;
 
 public:
+	explicit BoundSubqueryExpression(LogicalType return_type);
+
+	bool IsCorrelated() const {
+		return !binder->correlated_columns.empty();
+	}
+
+public:
+	const shared_ptr<Binder> &GetBinder() const {
+		return binder;
+	}
+	shared_ptr<Binder> &GetBinderMutable() {
+		return binder;
+	}
+	const BoundStatement &Subquery() const {
+		return subquery;
+	}
+	BoundStatement &SubqueryMutable() {
+		return subquery;
+	}
+	SubqueryType GetSubqueryType() const {
+		return subquery_type;
+	}
+	SubqueryType &SubqueryTypeMutable() {
+		return subquery_type;
+	}
+	const vector<unique_ptr<Expression>> &GetChildren() const {
+		return children;
+	}
+	vector<unique_ptr<Expression>> &GetChildrenMutable() {
+		return children;
+	}
+	const vector<LogicalType> &GetChildTypes() const {
+		return child_types;
+	}
+	vector<LogicalType> &ChildTypesMutable() {
+		return child_types;
+	}
+	const vector<LogicalType> &GetChildTargets() const {
+		return child_targets;
+	}
+	vector<LogicalType> &ChildTargetsMutable() {
+		return child_targets;
+	}
+	ExpressionType ComparisonType() const {
+		return comparison_type;
+	}
+	ExpressionType &ComparisonTypeMutable() {
+		return comparison_type;
+	}
 	bool HasSubquery() const override {
 		return true;
 	}
@@ -52,13 +81,27 @@ public:
 
 	string ToString() const override;
 
-	bool Equals(const BaseExpression *other) const override;
+	bool Equals(const BaseExpression &other) const override;
 
-	unique_ptr<Expression> Copy() override;
+	unique_ptr<Expression> Copy() const override;
 
 	bool PropagatesNullValues() const override;
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<Expression> Deserialize(ExpressionDeserializationState &state, FieldReader &reader);
+private:
+	//! The binder used to bind the subquery node
+	shared_ptr<Binder> binder;
+	//! The bound subquery node
+	BoundStatement subquery;
+	//! The subquery type
+	SubqueryType subquery_type;
+	//! the child expressions to compare with (in case of IN, ANY, ALL operators)
+	vector<unique_ptr<Expression>> children;
+	//! The comparison type of the child expression with the subquery (in case of ANY, ALL operators)
+	ExpressionType comparison_type;
+	//! The LogicalTypes of the subquery result. Only used for ANY expressions.
+	vector<LogicalType> child_types;
+	//! The target LogicalType of the subquery result (i.e. to which type it should be casted, if child_type <>
+	//! child_target). Only used for ANY expressions.
+	vector<LogicalType> child_targets;
 };
 } // namespace duckdb

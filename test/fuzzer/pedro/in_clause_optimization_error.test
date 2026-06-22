@@ -3,9 +3,6 @@
 # group: [pedro]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE t0(c0 INT);
 
 statement ok
@@ -13,6 +10,8 @@ INSERT INTO t0 VALUES (42)
 
 statement error
 SELECT 0 FROM t0 WHERE ? IN (1);
+----
+<REGEX>:Invalid Input Error.*Values were not provided for the following.*
 
 statement ok
 PREPARE v1 AS SELECT 0 FROM t0 WHERE ? IN (1);

@@ -3,7 +3,7 @@
 # group: [string]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE strings(s VARCHAR)
@@ -27,3 +27,9 @@ NULL
 7
 7
 
+# aliases work
+query II
+SELECT char_length('asdf'), CHARACTER_LENGTH('asdf')
+----
+4
+4

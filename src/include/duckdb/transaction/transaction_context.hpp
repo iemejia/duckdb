@@ -8,12 +8,17 @@
 
 #pragma once
 
-#include "duckdb/common/common.hpp"
 #include "duckdb/common/assert.hpp"
+#include "duckdb/common/common.hpp"
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/parser/parsed_data/transaction_info.hpp"
 
 namespace duckdb {
 
 class ClientContext;
+class MetaTransaction;
 class Transaction;
 class TransactionManager;
 
@@ -21,37 +26,54 @@ class TransactionManager;
 //! current transaction
 class TransactionContext {
 public:
-	TransactionContext(TransactionManager &transaction_manager, ClientContext &context)
-	    : transaction_manager(transaction_manager), context(context), auto_commit(true), current_transaction(nullptr) {
-	}
+	explicit TransactionContext(ClientContext &context);
 	~TransactionContext();
 
-	Transaction &ActiveTransaction() {
-		D_ASSERT(current_transaction);
+	MetaTransaction &ActiveTransaction() {
+		if (!current_transaction) {
+			throw InternalException("TransactionContext::ActiveTransaction called without active transaction");
+		}
 		return *current_transaction;
 	}
 
-	bool HasActiveTransaction() {
-		return !!current_transaction;
+	bool HasActiveTransaction() const {
+		return current_transaction.get();
 	}
 
-	void RecordQuery(string query);
 	void BeginTransaction();
 	void Commit();
-	void Rollback();
+	void Rollback(optional_ptr<ErrorData>);
 	void ClearTransaction();
 
 	void SetAutoCommit(bool value);
-	bool IsAutoCommit() {
+	bool IsAutoCommit() const {
 		return auto_commit;
 	}
 
+	void SetReadOnly();
+
+	idx_t GetActiveQuery();
+	void ResetActiveQuery();
+	void SetActiveQuery(transaction_t query_number);
+
+	void SetInvalidationPolicy(TransactionInvalidationPolicy new_invalidation_policy);
+	TransactionInvalidationPolicy GetInvalidationPolicy() {
+		return invalidation_policy;
+	};
+	void SetAutoRollback(bool new_auto_rollback) {
+		auto_rollback = new_auto_rollback;
+	};
+	bool GetAutoRollback() {
+		return auto_rollback;
+	};
+
 private:
-	TransactionManager &transaction_manager;
 	ClientContext &context;
 	bool auto_commit;
+	TransactionInvalidationPolicy invalidation_policy;
+	bool auto_rollback;
 
-	Transaction *current_transaction;
+	unique_ptr<MetaTransaction> current_transaction;
 
 	TransactionContext(const TransactionContext &) = delete;
 };

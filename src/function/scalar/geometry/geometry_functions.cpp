@@ -1,0 +1,356 @@
+#include "duckdb/function/scalar/geometry_functions.hpp"
+#include "duckdb/common/types/geometry.hpp"
+#include "duckdb/common/types/geometry_crs.hpp"
+#include "duckdb/common/vector_operations/binary_executor.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+
+namespace duckdb {
+
+static void FromWKBFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	Geometry::FromBinary(input.data[0], result, input.size(), true);
+}
+
+ScalarFunction StGeomfromwkbFun::GetFunction() {
+	ScalarFunction function({LogicalType::BLOB}, LogicalType::GEOMETRY(), FromWKBFunction);
+	return function;
+}
+
+static void ToWKBFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(input.data[0], result, [&](const string_t &geom) {
+		// TODO: convert to internal representation
+		return geom;
+	});
+	// Add a heap reference to the input WKB to prevent it from being freed
+	StringVector::AddHeapReference(input.data[0], result);
+}
+
+ScalarFunction StAswkbFun::GetFunction() {
+	ScalarFunction function({LogicalType::GEOMETRY()}, LogicalType::BLOB, ToWKBFunction);
+	return function;
+}
+
+static void ToWKTFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	auto &heap = StringVector::GetStringHeap(result);
+	UnaryExecutor::Execute<string_t, string_t>(input.data[0], result,
+	                                           [&](const string_t &geom) { return Geometry::ToString(heap, geom); });
+}
+
+ScalarFunction StAstextFun::GetFunction() {
+	ScalarFunction function({LogicalType::GEOMETRY()}, LogicalType::VARCHAR, ToWKTFunction);
+	return function;
+}
+
+static void IntersectsExtentFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, bool>(
+	    input.data[0], input.data[1], result, [](const string_t &lhs_geom, const string_t &rhs_geom) {
+		    auto lhs_extent = GeometryExtent::Empty();
+		    auto rhs_extent = GeometryExtent::Empty();
+
+		    const auto lhs_is_empty = Geometry::GetExtent(lhs_geom, lhs_extent) == 0;
+		    const auto rhs_is_empty = Geometry::GetExtent(rhs_geom, rhs_extent) == 0;
+
+		    if (lhs_is_empty || rhs_is_empty) {
+			    // One of the geometries is empty
+			    return false;
+		    }
+
+		    // Don't take Z and M into account for intersection test
+		    return lhs_extent.IntersectsXY(rhs_extent);
+	    });
+}
+
+ScalarFunction StIntersectsExtentFun::GetFunction() {
+	ScalarFunction function({LogicalType::GEOMETRY(), LogicalType::GEOMETRY()}, LogicalType::BOOLEAN,
+	                        IntersectsExtentFunction);
+	return function;
+}
+
+static Value GetCRSValue(const LogicalType &logical_type) {
+	if (!GeoType::HasCRS(logical_type)) {
+		// Return null
+		return Value(LogicalTypeId::VARCHAR);
+	}
+	auto &crs = GeoType::GetCRS(logical_type);
+	return Value(crs.GetDefinition());
+}
+
+static void CRSFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &type = args.data[0].GetType();
+	result.Reference(GetCRSValue(type), count_t(args.size()));
+}
+
+static unique_ptr<Expression> BindCRSFunctionExpression(FunctionBindExpressionInput &input) {
+	const auto &return_type = input.children[0]->GetReturnType();
+	if (return_type.id() != LogicalTypeId::GEOMETRY) {
+		// parameter - unknown return type
+		return nullptr;
+	}
+
+	return make_uniq<BoundConstantExpression>(GetCRSValue(return_type));
+}
+
+static unique_ptr<FunctionData> BindCRSFunction(BindScalarFunctionInput &input) {
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+
+	if (arguments[0]->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
+		return nullptr;
+	}
+
+	// Propagate the CRS from the input argument to the parameter type
+	bound_function.GetArguments()[0] = arguments[0]->GetReturnType();
+	return nullptr;
+}
+
+ScalarFunction StCrsFun::GetFunction() {
+	ScalarFunction geom_func({LogicalType::GEOMETRY()}, LogicalType::VARCHAR, CRSFunction, BindCRSFunction);
+	geom_func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	geom_func.SetBindExpressionCallback(BindCRSFunctionExpression);
+	return geom_func;
+}
+
+static unique_ptr<FunctionData> SetCRSBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+
+	// Check if the CRS is set in the second argument
+	if (arguments[1]->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
+	if (!arguments[1]->IsFoldable()) {
+		throw BinderException("ST_SetCRS: CRS argument must be constant!");
+	}
+	const auto crs_val = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+	if (!crs_val.IsNull()) {
+		const auto &crs_str = StringValue::Get(crs_val);
+
+		// Try to convert to identify
+		const auto lookup = CoordinateReferenceSystem::TryIdentify(context, crs_str);
+		if (lookup) {
+			bound_function.SetReturnType(LogicalType::GEOMETRY(lookup->GetDefinition()));
+		} else {
+			// Pass on the raw string (better than nothing)
+			bound_function.SetReturnType(LogicalType::GEOMETRY(crs_str));
+		}
+	}
+
+	// Erase the CRS argument expression
+	return nullptr;
+}
+
+static void SetCRSFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	result.Reinterpret(args.data[0]);
+}
+
+ScalarFunction StSetcrsFun::GetFunction() {
+	ScalarFunction geom_func({LogicalType::GEOMETRY(), LogicalType::VARCHAR}, LogicalType::GEOMETRY(), SetCRSFunction,
+	                         SetCRSBind);
+	return geom_func;
+}
+
+namespace {
+
+struct VertexExtractBindData final : public FunctionData {
+	explicit VertexExtractBindData(idx_t vertex_index) : vertex_index(vertex_index) {
+	}
+
+	idx_t vertex_index;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<VertexExtractBindData>(vertex_index);
+	}
+
+	auto Equals(const FunctionData &other) const -> bool override {
+		auto &other_bind = other.Cast<VertexExtractBindData>();
+		return vertex_index == other_bind.vertex_index;
+	}
+};
+
+} // namespace
+
+static auto VertexExtractBind(BindScalarFunctionInput &input) -> unique_ptr<FunctionData> {
+	auto &arguments = input.GetArguments();
+
+	if (arguments[1]->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
+	if (!arguments[1]->IsFoldable()) {
+		throw BinderException("vertex_extract: vertex argument must be constant!");
+	}
+	const auto vertex_val = ExpressionExecutor::EvaluateScalar(input.GetClientContext(), *arguments[1]);
+	if (vertex_val.IsNull()) {
+		throw BinderException("vertex_extract: vertex argument cannot be NULL!");
+	}
+	const auto vertex_str = StringUtil::Lower(StringValue::Get(vertex_val));
+	if (vertex_str == "x") {
+		return make_uniq<VertexExtractBindData>(static_cast<idx_t>(0));
+	}
+	if (vertex_str == "y") {
+		return make_uniq<VertexExtractBindData>(static_cast<idx_t>(1));
+	}
+	if (vertex_str == "z") {
+		return make_uniq<VertexExtractBindData>(static_cast<idx_t>(2));
+	}
+	if (vertex_str == "m") {
+		return make_uniq<VertexExtractBindData>(static_cast<idx_t>(3));
+	}
+	throw BinderException("vertex_extract: invalid vertex argument '%s', expected one of 'x', 'y', 'z', or 'm'",
+	                      vertex_str);
+}
+
+static auto VertexExtractStats(ClientContext &context, FunctionStatisticsInput &input) -> unique_ptr<BaseStatistics> {
+	const auto &child_stats = input.child_stats;
+	const auto &bind_data = input.bind_data->Cast<VertexExtractBindData>();
+
+	const auto &extent = GeometryStats::GetExtent(child_stats[0]);
+	const auto &types = GeometryStats::GetTypes(child_stats[0]);
+	const auto &flags = GeometryStats::GetFlags(child_stats[0]);
+
+	auto new_stats = NumericStats::CreateUnknown(LogicalType::DOUBLE);
+
+	if (!types.Has(GeometryType::POINT) || !flags.HasNonEmptyGeometry()) {
+		// No non-empty points present, so vertex extraction will always return NULL
+		*input.expr_ptr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
+		new_stats.Set(StatsInfo::CANNOT_HAVE_VALID_VALUES);
+		new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+		return new_stats.ToUnique();
+	}
+
+	new_stats.CopyValidity(child_stats[0]);
+
+	if (!types.HasOnly(GeometryType::POINT)) {
+		// If there are non-point geometries, we cannot guarantee that all rows will yield a valid value
+		new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+	}
+
+	// If there are empty geometries, we cannot guarantee that all rows will yield a valid value
+	if (flags.HasEmptyGeometry()) {
+		new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+	}
+
+	if (bind_data.vertex_index == 2) {
+		// Z is absent on XY and XYM points
+		if (types.Has(VertexType::XY) || types.Has(VertexType::XYM)) {
+			new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+		}
+		if (!types.Has(VertexType::XYZ) && !types.Has(VertexType::XYZM)) {
+			// If there are no vertex types with Z, we can guarantee that all rows will yield NULL
+			*input.expr_ptr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
+			new_stats.Set(StatsInfo::CANNOT_HAVE_VALID_VALUES);
+			new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+			return new_stats.ToUnique();
+		}
+	}
+
+	if (bind_data.vertex_index == 3) {
+		// M is absent on XY and XYZ points
+		if (types.Has(VertexType::XY) || types.Has(VertexType::XYZ)) {
+			new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+		}
+		if (!types.Has(VertexType::XYM) && !types.Has(VertexType::XYZM)) {
+			// If there are no vertex types with M, we can guarantee that all rows will yield NULL
+			*input.expr_ptr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
+			new_stats.Set(StatsInfo::CANNOT_HAVE_VALID_VALUES);
+			new_stats.Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+			return new_stats.ToUnique();
+		}
+	}
+
+	if (bind_data.vertex_index == 0 && extent.HasXY()) { // X
+		NumericStats::SetMin(new_stats, extent.x_min);
+		NumericStats::SetMax(new_stats, extent.x_max);
+		return new_stats.ToUnique();
+	}
+	if (bind_data.vertex_index == 1 && extent.HasXY()) { // Y
+		NumericStats::SetMin(new_stats, extent.y_min);
+		NumericStats::SetMax(new_stats, extent.y_max);
+		return new_stats.ToUnique();
+	}
+	if (bind_data.vertex_index == 2 && extent.HasZ()) { // Z
+		NumericStats::SetMin(new_stats, extent.z_min);
+		NumericStats::SetMax(new_stats, extent.z_max);
+		return new_stats.ToUnique();
+	}
+	if (bind_data.vertex_index == 3 && extent.HasM()) { // M
+		NumericStats::SetMin(new_stats, extent.m_min);
+		NumericStats::SetMax(new_stats, extent.m_max);
+		return new_stats.ToUnique();
+	}
+
+	return nullptr;
+}
+
+static auto VertexExtractFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	const auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	const auto &bind_data = func_expr.BindInfo()->Cast<VertexExtractBindData>();
+
+	UnaryExecutor::Execute<string_t, double>(input.data[0], result, [&](const string_t &geom_str) {
+		const auto data = const_data_ptr_cast(geom_str.GetData());
+		const auto size = geom_str.GetSize();
+		const auto meta = Load<uint32_t>(data + sizeof(uint8_t));
+
+		const auto type_id = (meta & 0x0000FFFF) % 1000;
+		const auto flag_id = (meta & 0x0000FFFF) / 1000;
+		const auto has_z = ((flag_id & 0x01) != 0);
+		const auto has_m = ((flag_id & 0x02) != 0);
+
+		if (type_id != 1) {
+			return optional<double>();
+		}
+
+		auto value = std::numeric_limits<double>::quiet_NaN();
+
+		if (bind_data.vertex_index == 0) { // X
+			constexpr auto offset = sizeof(uint8_t) + sizeof(uint32_t);
+			if (size < offset + sizeof(double)) {
+				return optional<double>();
+			}
+			value = Load<double>(data + offset);
+		} else if (bind_data.vertex_index == 1) { // Y
+			constexpr auto offset = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(double);
+			if (size < offset + sizeof(double)) {
+				return optional<double>();
+			}
+			value = Load<double>(data + offset);
+		} else if (bind_data.vertex_index == 2) { // Z
+			if (!has_z) {
+				return optional<double>();
+			}
+			constexpr auto offset = sizeof(uint8_t) + sizeof(uint32_t) + 2 * sizeof(double);
+			if (size < offset + sizeof(double)) {
+				return optional<double>();
+			}
+			value = Load<double>(data + offset);
+		} else if (bind_data.vertex_index == 3) { // M
+			if (!has_m) {
+				return optional<double>();
+			}
+			const auto offset = sizeof(uint8_t) + sizeof(uint32_t) + (2 + has_z) * sizeof(double);
+			if (size < offset + sizeof(double)) {
+				return optional<double>();
+			}
+			value = Load<double>(data + offset);
+		}
+
+		if (std::isnan(value)) {
+			return optional<double>();
+		}
+
+		return optional<double>(value);
+	});
+}
+
+ScalarFunction VertexExtractFun::GetFunction() {
+	auto fun = ScalarFunction({}, LogicalTypeId::DOUBLE, VertexExtractFunction, VertexExtractBind, VertexExtractStats);
+	fun.GetSignature()
+	    .AddParameter("geom", LogicalType::GEOMETRY())
+	    .AddParameter("coordinate", LogicalTypeId::VARCHAR)
+	    .SetReturnType(LogicalType::DOUBLE);
+
+	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	return fun;
+}
+
+} // namespace duckdb

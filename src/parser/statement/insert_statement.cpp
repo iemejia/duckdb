@@ -1,85 +1,80 @@
 #include "duckdb/parser/statement/insert_statement.hpp"
-#include "duckdb/parser/query_node/select_node.hpp"
-#include "duckdb/parser/tableref/expressionlistref.hpp"
+#include "duckdb/parser/query_node/insert_query_node.hpp"
 
 namespace duckdb {
 
-InsertStatement::InsertStatement() : SQLStatement(StatementType::INSERT_STATEMENT), schema(DEFAULT_SCHEMA) {
+OnConflictInfo::OnConflictInfo() : action_type(OnConflictAction::THROW) {
+}
+
+OnConflictInfo::OnConflictInfo(const OnConflictInfo &other)
+    : action_type(other.action_type), indexed_columns(other.indexed_columns) {
+	if (other.set_info) {
+		set_info = other.set_info->Copy();
+	}
+	if (other.condition) {
+		condition = other.condition->Copy();
+	}
+}
+
+unique_ptr<OnConflictInfo> OnConflictInfo::Copy() const {
+	return unique_ptr<OnConflictInfo>(new OnConflictInfo(*this));
+}
+
+bool OnConflictInfo::Equals(const unique_ptr<OnConflictInfo> &left, const unique_ptr<OnConflictInfo> &right) {
+	if (!left && !right) {
+		return true;
+	}
+	if (!left || !right) {
+		return false;
+	}
+	if (left->action_type != right->action_type) {
+		return false;
+	}
+	if (left->indexed_columns != right->indexed_columns) {
+		return false;
+	}
+	if (!UpdateSetInfo::Equals(left->set_info, right->set_info)) {
+		return false;
+	}
+	if (!ParsedExpression::Equals(left->condition, right->condition)) {
+		return false;
+	}
+	return true;
+}
+
+InsertStatement::InsertStatement() : SQLStatement(StatementType::INSERT_STATEMENT), node(make_uniq<InsertQueryNode>()) {
 }
 
 InsertStatement::InsertStatement(const InsertStatement &other)
-    : SQLStatement(other),
-      select_statement(unique_ptr_cast<SQLStatement, SelectStatement>(other.select_statement->Copy())),
-      columns(other.columns), table(other.table), schema(other.schema) {
-	cte_map = other.cte_map.Copy();
+    : SQLStatement(other), node(unique_ptr_cast<QueryNode, InsertQueryNode>(other.node->Copy())) {
+}
+
+string OnConflictInfo::ActionToString(OnConflictAction action) {
+	switch (action) {
+	case OnConflictAction::NOTHING:
+		return "DO NOTHING";
+	case OnConflictAction::REPLACE:
+	case OnConflictAction::UPDATE:
+		return "DO UPDATE";
+	case OnConflictAction::THROW:
+		// Explicitly left empty, for ToString purposes
+		return "";
+	default: {
+		throw NotImplementedException("type not implemented for OnConflictActionType");
+	}
+	}
 }
 
 string InsertStatement::ToString() const {
-	string result;
-	result = cte_map.ToString();
-	result += "INSERT INTO ";
-	if (!schema.empty()) {
-		result += KeywordHelper::WriteOptionallyQuoted(schema) + ".";
-	}
-	result += KeywordHelper::WriteOptionallyQuoted(table);
-	if (!columns.empty()) {
-		result += " (";
-		for (idx_t i = 0; i < columns.size(); i++) {
-			if (i > 0) {
-				result += ", ";
-			}
-			result += KeywordHelper::WriteOptionallyQuoted(columns[i]);
-		}
-		result += " )";
-	}
-	result += " ";
-	auto values_list = GetValuesList();
-	if (values_list) {
-		values_list->alias = string();
-		result += values_list->ToString();
-	} else {
-		result += select_statement->ToString();
-	}
-	if (!returning_list.empty()) {
-		result += " RETURNING ";
-		for (idx_t i = 0; i < returning_list.size(); i++) {
-			if (i > 0) {
-				result += ", ";
-			}
-			result += returning_list[i]->ToString();
-		}
-	}
-	return result;
+	return node->ToString();
 }
 
 unique_ptr<SQLStatement> InsertStatement::Copy() const {
 	return unique_ptr<InsertStatement>(new InsertStatement(*this));
 }
 
-ExpressionListRef *InsertStatement::GetValuesList() const {
-	if (select_statement->node->type != QueryNodeType::SELECT_NODE) {
-		return nullptr;
-	}
-	auto &node = (SelectNode &)*select_statement->node;
-	if (node.where_clause || node.qualify || node.having) {
-		return nullptr;
-	}
-	if (!node.cte_map.map.empty()) {
-		return nullptr;
-	}
-	if (!node.groups.grouping_sets.empty()) {
-		return nullptr;
-	}
-	if (node.aggregate_handling != AggregateHandling::STANDARD_HANDLING) {
-		return nullptr;
-	}
-	if (node.select_list.size() != 1 || node.select_list[0]->type != ExpressionType::STAR) {
-		return nullptr;
-	}
-	if (!node.from_table || node.from_table->type != TableReferenceType::EXPRESSION_LIST) {
-		return nullptr;
-	}
-	return (ExpressionListRef *)node.from_table.get();
+optional_ptr<ExpressionListRef> InsertStatement::GetValuesList() const {
+	return node->GetValuesList();
 }
 
 } // namespace duckdb

@@ -5,17 +5,21 @@ using WeakRefStrings
 using Tables
 using Base.Libc
 using Dates
-using DataFrames
 using Tables
 using UUIDs
 using FixedPointDecimals
 
 export DBInterface, DuckDBException
 
+abstract type ResultType end
+struct MaterializedResult <: ResultType end
+struct StreamResult <: ResultType end
+
 include("helper.jl")
 include("exceptions.jl")
 include("ctypes.jl")
 include("api.jl")
+include("api_helper.jl")
 include("logical_type.jl")
 include("value.jl")
 include("validity_mask.jl")
@@ -29,8 +33,9 @@ include("transaction.jl")
 include("ddl.jl")
 include("appender.jl")
 include("table_function.jl")
+include("scalar_function.jl")
 include("replacement_scan.jl")
-include("data_frame_scan.jl")
+include("table_scan.jl")
 include("old_interface.jl")
 
 end # module

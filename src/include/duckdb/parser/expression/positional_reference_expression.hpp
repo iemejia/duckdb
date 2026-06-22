@@ -13,22 +13,35 @@
 namespace duckdb {
 class PositionalReferenceExpression : public ParsedExpression {
 public:
-	DUCKDB_API PositionalReferenceExpression(idx_t index);
-
-	idx_t index;
+	static constexpr const ExpressionClass TYPE = ExpressionClass::POSITIONAL_REFERENCE;
 
 public:
+	DUCKDB_API explicit PositionalReferenceExpression(idx_t index);
+
+public:
+	idx_t Index() const {
+		return index;
+	}
+	idx_t &IndexMutable() {
+		return index;
+	}
 	bool IsScalar() const override {
 		return false;
 	}
 
 	string ToString() const override;
 
-	static bool Equals(const PositionalReferenceExpression *a, const PositionalReferenceExpression *b);
+	bool Equals(const ParsedExpression &other) const override;
 	unique_ptr<ParsedExpression> Copy() const override;
 	hash_t Hash() const override;
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<ParsedExpression> Deserialize(ExpressionType type, FieldReader &source);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ParsedExpression> Deserialize(Deserializer &deserializer);
+
+private:
+	idx_t index;
+
+private:
+	PositionalReferenceExpression();
 };
 } // namespace duckdb

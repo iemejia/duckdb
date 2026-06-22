@@ -2,7 +2,7 @@
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
-#include "duckdb/common/field_writer.hpp"
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
@@ -16,15 +16,36 @@ vector<ColumnBinding> LogicalJoin::GetColumnBindings() {
 		// for SEMI and ANTI join we only project the left hand side
 		return left_bindings;
 	}
+
 	if (join_type == JoinType::MARK) {
 		// for MARK join we project the left hand side plus the MARK column
-		left_bindings.emplace_back(mark_index, 0);
+		left_bindings.emplace_back(mark_index, ProjectionIndex(0));
 		return left_bindings;
 	}
 	// for other join types we project both the LHS and the RHS
 	auto right_bindings = MapBindings(children[1]->GetColumnBindings(), right_projection_map);
+	if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI) {
+		return right_bindings;
+	}
 	left_bindings.insert(left_bindings.end(), right_bindings.begin(), right_bindings.end());
 	return left_bindings;
+}
+
+vector<TableIndex> LogicalJoin::GetTableIndex() const {
+	vector<TableIndex> result;
+	if (join_type == JoinType::MARK) {
+		result.emplace_back(mark_index);
+	}
+	return result;
+}
+
+string LogicalJoin::GetName() const {
+#ifdef DEBUG
+	if (DBConfigOptions::debug_print_bindings && join_type == JoinType::MARK) {
+		return LogicalOperator::GetName() + StringUtil::Format(" #%llu", mark_index.index);
+	}
+#endif
+	return LogicalOperator::GetName();
 }
 
 void LogicalJoin::ResolveTypes() {
@@ -40,39 +61,26 @@ void LogicalJoin::ResolveTypes() {
 	}
 	// for any other join we project both sides
 	auto right_types = MapTypes(children[1]->types, right_projection_map);
+	if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI) {
+		types = right_types;
+		return;
+	}
 	types.insert(types.end(), right_types.begin(), right_types.end());
 }
 
-void LogicalJoin::GetTableReferences(LogicalOperator &op, unordered_set<idx_t> &bindings) {
+void LogicalJoin::GetTableReferences(LogicalOperator &op, unordered_set<TableIndex> &bindings) {
 	auto column_bindings = op.GetColumnBindings();
 	for (auto binding : column_bindings) {
 		bindings.insert(binding.table_index);
 	}
 }
 
-void LogicalJoin::GetExpressionBindings(Expression &expr, unordered_set<idx_t> &bindings) {
-	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-		auto &colref = (BoundColumnRefExpression &)expr;
-		D_ASSERT(colref.depth == 0);
-		bindings.insert(colref.binding.table_index);
-	}
-	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { GetExpressionBindings(child, bindings); });
-}
-
-void LogicalJoin::Serialize(FieldWriter &writer) const {
-	writer.WriteField<JoinType>(join_type);
-	writer.WriteField<idx_t>(mark_index);
-	writer.WriteList<idx_t>(left_projection_map);
-	writer.WriteList<idx_t>(right_projection_map);
-	//	writer.WriteSerializableList(join_stats);
-}
-
-void LogicalJoin::Deserialize(LogicalJoin &join, LogicalDeserializationState &state, FieldReader &reader) {
-	join.join_type = reader.ReadRequired<JoinType>();
-	join.mark_index = reader.ReadRequired<idx_t>();
-	join.left_projection_map = reader.ReadRequiredList<idx_t>();
-	join.right_projection_map = reader.ReadRequiredList<idx_t>();
-	//	join.join_stats = reader.ReadRequiredSerializableList<BaseStatistics>(reader.GetSource());
+void LogicalJoin::GetExpressionBindings(const Expression &root_expr, unordered_set<TableIndex> &bindings) {
+	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(root_expr,
+	                                                              [&](const BoundColumnRefExpression &colref) {
+		                                                              D_ASSERT(colref.Depth() == 0);
+		                                                              bindings.insert(colref.Binding().table_index);
+	                                                              });
 }
 
 } // namespace duckdb

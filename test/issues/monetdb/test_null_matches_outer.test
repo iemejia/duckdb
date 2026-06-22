@@ -3,7 +3,7 @@
 # group: [monetdb]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 create table "E" ("intCol" bigint, "stringCol" varchar);

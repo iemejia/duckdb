@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/common/enums/set_scope.hpp"
 #include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -17,17 +18,22 @@ namespace duckdb {
 
 class LogicalSet : public LogicalOperator {
 public:
-	LogicalSet(std::string name_p, Value value_p, SetScope scope_p)
-	    : LogicalOperator(LogicalOperatorType::LOGICAL_SET), name(name_p), value(value_p), scope(scope_p) {
+	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_SET;
+
+public:
+	LogicalSet(Identifier name_p, Value value_p, SetScope scope_p)
+	    : LogicalOperator(LogicalOperatorType::LOGICAL_SET), name(std::move(name_p)), value(std::move(value_p)),
+	      scope(scope_p) {
 	}
 
-	std::string name;
+	Identifier name;
 	Value value;
 	SetScope scope;
 
 public:
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
+
 	idx_t EstimateCardinality(ClientContext &context) override;
 
 protected:

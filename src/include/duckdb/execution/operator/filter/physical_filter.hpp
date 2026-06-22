@@ -18,7 +18,11 @@ namespace duckdb {
 //! adds a selection vector to the chunk.
 class PhysicalFilter : public CachingPhysicalOperator {
 public:
-	PhysicalFilter(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list, idx_t estimated_cardinality);
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::FILTER;
+
+public:
+	PhysicalFilter(PhysicalPlan &physical_plan, vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
+	               idx_t estimated_cardinality);
 
 	//! The filter expression
 	unique_ptr<Expression> expression;
@@ -30,7 +34,7 @@ public:
 		return true;
 	}
 
-	string ParamsToString() const override;
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
 protected:
 	OperatorResultType ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,

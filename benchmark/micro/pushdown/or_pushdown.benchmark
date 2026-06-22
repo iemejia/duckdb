@@ -1,5 +1,5 @@
 # name: benchmark/micro/pushdown/or_pushdown.benchmark
-# description: Show the perfomance of OR pushed down
+# description: Show the performance of OR pushed down
 # group: [pushdown]
 
 name OrPushdown
@@ -8,7 +8,7 @@ subgroup pushdown
 
 require tpch
 
-cache tpch_sf1
+cache tpch_sf1.duckdb
 
 load
 CALL dbgen(sf=1);

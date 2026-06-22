@@ -2,13 +2,14 @@
 
 namespace duckdb {
 
-CopyStatement::CopyStatement() : SQLStatement(StatementType::COPY_STATEMENT), info(make_unique<CopyInfo>()) {
+CopyStatement::CopyStatement() : SQLStatement(StatementType::COPY_STATEMENT), info(make_uniq<CopyInfo>()) {
 }
 
 CopyStatement::CopyStatement(const CopyStatement &other) : SQLStatement(other), info(other.info->Copy()) {
-	if (other.select_statement) {
-		select_statement = other.select_statement->Copy();
-	}
+}
+
+string CopyStatement::ToString() const {
+	return info->ToString();
 }
 
 unique_ptr<SQLStatement> CopyStatement::Copy() const {

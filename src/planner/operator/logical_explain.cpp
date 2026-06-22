@@ -1,22 +1,32 @@
-#include "duckdb/common/field_writer.hpp"
 #include "duckdb/planner/operator/logical_explain.hpp"
 
 namespace duckdb {
 
-void LogicalExplain::Serialize(FieldWriter &writer) const {
-	writer.WriteField(explain_type);
-	writer.WriteString(physical_plan);
-	writer.WriteString(logical_plan_unopt);
-	writer.WriteString(logical_plan_opt);
+LogicalExplain::LogicalExplain(unique_ptr<LogicalOperator> plan, ExplainType explain_type,
+                               const ProfilerPrintFormat &format)
+    : LogicalOperator(LogicalOperatorType::LOGICAL_EXPLAIN), explain_type(explain_type), format(format) {
+	children.push_back(std::move(plan));
 }
 
-unique_ptr<LogicalOperator> LogicalExplain::Deserialize(LogicalDeserializationState &state, FieldReader &reader) {
-	auto explain_type = reader.ReadRequired<ExplainType>();
-	// TODO(stephwang) review if unique_ptr<LogicalOperator> plan is needed
-	auto result = unique_ptr<LogicalExplain>(new LogicalExplain(explain_type));
-	result->physical_plan = reader.ReadRequired<string>();
-	result->logical_plan_unopt = reader.ReadRequired<string>();
-	result->logical_plan_opt = reader.ReadRequired<string>();
-	return move(result);
+idx_t LogicalExplain::EstimateCardinality(ClientContext &context) {
+	return 3;
 }
+
+bool LogicalExplain::SupportSerialization() const {
+	//! Skips the serialization check in VerifyPlan
+	return false;
+}
+
+void LogicalExplain::ResolveTypes() {
+	types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+}
+vector<ColumnBinding> LogicalExplain::GetColumnBindings() {
+	vector<ColumnBinding> result;
+	TableIndex explain_tbl_idx(0);
+	for (auto explain_col_idx : ProjectionIndex::GetIndexes(2)) {
+		result.emplace_back(explain_tbl_idx, explain_col_idx);
+	}
+	return result;
+}
+
 } // namespace duckdb

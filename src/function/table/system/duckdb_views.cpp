@@ -13,12 +13,19 @@ struct DuckDBViewsData : public GlobalTableFunctionState {
 	DuckDBViewsData() : offset(0) {
 	}
 
-	vector<CatalogEntry *> entries;
+	vector<reference<CatalogEntry>> entries;
+	vector<ColumnIndex> column_ids;
 	idx_t offset;
 };
 
 static unique_ptr<FunctionData> DuckDBViewsBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
+	names.emplace_back("database_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("database_oid");
+	return_types.emplace_back(LogicalType::BIGINT);
+
 	names.emplace_back("schema_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
@@ -30,6 +37,12 @@ static unique_ptr<FunctionData> DuckDBViewsBind(ClientContext &context, TableFun
 
 	names.emplace_back("view_oid");
 	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("comment");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("tags");
+	return_types.emplace_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 
 	names.emplace_back("internal");
 	return_types.emplace_back(LogicalType::BOOLEAN);
@@ -43,26 +56,27 @@ static unique_ptr<FunctionData> DuckDBViewsBind(ClientContext &context, TableFun
 	names.emplace_back("sql");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
+	names.emplace_back("is_bound");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+
 	return nullptr;
 }
 
 unique_ptr<GlobalTableFunctionState> DuckDBViewsInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto result = make_unique<DuckDBViewsData>();
+	auto result = make_uniq<DuckDBViewsData>();
 
-	// scan all the schemas for tables and collect themand collect them
-	auto schemas = Catalog::GetCatalog(context).schemas->GetEntries<SchemaCatalogEntry>(context);
+	// scan all the schemas for tables and collect them and collect them
+	auto schemas = Catalog::GetAllSchemas(context);
 	for (auto &schema : schemas) {
-		schema->Scan(context, CatalogType::VIEW_ENTRY, [&](CatalogEntry *entry) { result->entries.push_back(entry); });
+		schema.get().Scan(context, CatalogType::VIEW_ENTRY,
+		                  [&](CatalogEntry &entry) { result->entries.push_back(entry); });
 	};
-
-	// check the temp schema as well
-	SchemaCatalogEntry::GetTemporaryObjects(context)->Scan(
-	    context, CatalogType::VIEW_ENTRY, [&](CatalogEntry *entry) { result->entries.push_back(entry); });
-	return move(result);
+	result->column_ids = input.column_indexes;
+	return std::move(result);
 }
 
 void DuckDBViewsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = (DuckDBViewsData &)*data_p.global_state;
+	auto &data = data_p.global_state->Cast<DuckDBViewsData>();
 	if (data.offset >= data.entries.size()) {
 		// finished returning values
 		return;
@@ -71,38 +85,90 @@ void DuckDBViewsFunction(ClientContext &context, TableFunctionInput &data_p, Dat
 	// either fill up the chunk or return all the remaining columns
 	idx_t count = 0;
 	while (data.offset < data.entries.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &entry = data.entries[data.offset++];
+		auto &entry = data.entries[data.offset++].get();
 
-		if (entry->type != CatalogType::VIEW_ENTRY) {
+		if (entry.type != CatalogType::VIEW_ENTRY) {
 			continue;
 		}
-		auto &view = (ViewCatalogEntry &)*entry;
+		auto &view = entry.Cast<ViewCatalogEntry>();
 
-		// return values:
-		// schema_name, LogicalType::VARCHAR
-		output.SetValue(0, count, Value(view.schema->name));
-		// schema_oid, LogicalType::BIGINT
-		output.SetValue(1, count, Value::BIGINT(view.schema->oid));
-		// view_name, LogicalType::VARCHAR
-		output.SetValue(2, count, Value(view.name));
-		// view_oid, LogicalType::BIGINT
-		output.SetValue(3, count, Value::BIGINT(view.oid));
-		// internal, LogicalType::BOOLEAN
-		output.SetValue(4, count, Value::BOOLEAN(view.internal));
-		// temporary, LogicalType::BOOLEAN
-		output.SetValue(5, count, Value::BOOLEAN(view.temporary));
-		// column_count, LogicalType::BIGINT
-		output.SetValue(6, count, Value::BIGINT(view.types.size()));
-		// sql, LogicalType::VARCHAR
-		output.SetValue(7, count, Value(view.ToSQL()));
-
+		for (idx_t c = 0; c < data.column_ids.size(); c++) {
+			auto column_id = data.column_ids[c].GetPrimaryIndex();
+			auto &col_vector = output.data[c];
+			switch (column_id) {
+			case 0:
+				// database_name, VARCHAR
+				col_vector.Append(Value(view.catalog.GetName()));
+				break;
+			case 1:
+				// database_oid, BIGINT
+				col_vector.Append(Value::BIGINT(NumericCast<int64_t>(view.catalog.GetOid())));
+				break;
+			case 2:
+				// schema_name, LogicalType::VARCHAR
+				col_vector.Append(Value(view.schema.name));
+				break;
+			case 3:
+				// schema_oid, LogicalType::BIGINT
+				col_vector.Append(Value::BIGINT(NumericCast<int64_t>(view.schema.oid)));
+				break;
+			case 4:
+				// view_name, LogicalType::VARCHAR
+				col_vector.Append(Value(view.name));
+				break;
+			case 5:
+				// view_oid, LogicalType::BIGINT
+				col_vector.Append(Value::BIGINT(NumericCast<int64_t>(view.oid)));
+				break;
+			case 6:
+				// comment, LogicalType::VARCHAR
+				col_vector.Append(Value(view.comment));
+				break;
+			case 7:
+				// tags, LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)
+				col_vector.Append(Value::MAP(view.tags));
+				break;
+			case 8:
+				// internal, LogicalType::BOOLEAN
+				col_vector.Append(Value::BOOLEAN(view.internal));
+				break;
+			case 9:
+				// temporary, LogicalType::BOOLEAN
+				col_vector.Append(Value::BOOLEAN(view.temporary));
+				break;
+			case 10: {
+				// column_count, LogicalType::BIGINT
+				// make sure the view is bound so we know the columns it emits
+				auto columns = view.GetColumnInfo();
+				Value column_count;
+				if (columns) {
+					column_count = Value::BIGINT(NumericCast<int64_t>(columns->types.size()));
+				}
+				col_vector.Append(column_count);
+				break;
+			}
+			case 11:
+				// sql, LogicalType::VARCHAR
+				col_vector.Append(Value(view.ToSQL()));
+				break;
+			case 12: {
+				// is_bound, LogicalType::BOOLEAN
+				auto columns = view.GetColumnInfo();
+				col_vector.Append(Value::BOOLEAN(columns.get()));
+				break;
+			}
+			default:
+				throw InternalException("Unsupported column index for duckdb_views");
+			}
+		}
 		count++;
 	}
-	output.SetCardinality(count);
 }
 
 void DuckDBViewsFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_views", {}, DuckDBViewsFunction, DuckDBViewsBind, DuckDBViewsInit));
+	TableFunction duckdb_views("duckdb_views", {}, DuckDBViewsFunction, DuckDBViewsBind, DuckDBViewsInit);
+	duckdb_views.projection_pushdown = true;
+	set.AddFunction(std::move(duckdb_views));
 }
 
 } // namespace duckdb

@@ -2,9 +2,6 @@
 # description: Prepared parameters default to VARCHAR if the type could not be deduced
 # group: [prepared]
 
-statement ok
-PRAGMA enable_verification
-
 # single unbound parameter
 statement ok
 PREPARE v1 AS SELECT ?
@@ -51,6 +48,7 @@ true
 
 statement error
 EXECUTE v2([[1, 2, 3]], [1, 2, 3])
+----
 
 # unbound parameter in scalar subquery
 statement ok
@@ -139,6 +137,7 @@ time: 27
 
 statement error
 EXECUTE v7('hello world', [1, 2, 3])
+----
 
 # unbound parameter with lists
 statement ok

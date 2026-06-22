@@ -15,18 +15,21 @@ namespace duckdb {
 
 class SetOpRelation : public Relation {
 public:
-	SetOpRelation(shared_ptr<Relation> left, shared_ptr<Relation> right, SetOperationType setop_type);
+	SetOpRelation(shared_ptr<Relation> left, shared_ptr<Relation> right, SetOperationType setop_type,
+	              bool setop_all = false);
 
 	shared_ptr<Relation> left;
 	shared_ptr<Relation> right;
 	SetOperationType setop_type;
+	vector<ColumnDefinition> columns;
+	bool setop_all;
 
 public:
 	unique_ptr<QueryNode> GetQueryNode() override;
 
 	const vector<ColumnDefinition> &Columns() override;
 	string ToString(idx_t depth) override;
-	string GetAlias() override;
+	Identifier GetAlias() override;
 };
 
 } // namespace duckdb

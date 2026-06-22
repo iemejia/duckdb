@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include "duckdb/common/types/column_data_collection.hpp"
+#include "duckdb/common/optionally_owned_ptr.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 
 namespace duckdb {
@@ -16,19 +17,36 @@ namespace duckdb {
 //! The PhysicalColumnDataScan scans a ColumnDataCollection
 class PhysicalColumnDataScan : public PhysicalOperator {
 public:
-	PhysicalColumnDataScan(vector<LogicalType> types, PhysicalOperatorType op_type, idx_t estimated_cardinality)
-	    : PhysicalOperator(op_type, move(types), estimated_cardinality), collection(nullptr) {
-	}
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::INVALID;
 
-	// the column data collection to scan
-	ColumnDataCollection *collection;
-	//! Owned column data collection, if any
-	unique_ptr<ColumnDataCollection> owned_collection;
+public:
+	PhysicalColumnDataScan(PhysicalPlan &physical_plan, vector<LogicalType> types, PhysicalOperatorType op_type,
+	                       idx_t estimated_cardinality, optionally_owned_ptr<ColumnDataCollection> collection);
+
+	PhysicalColumnDataScan(PhysicalPlan &physical_plan, vector<LogicalType> types, PhysicalOperatorType op_type,
+	                       idx_t estimated_cardinality, TableIndex cte_index);
+
+	//! (optionally owned) column data collection to scan
+	optionally_owned_ptr<ColumnDataCollection> collection;
+
+	TableIndex cte_index;
+	optional_idx delim_index;
 
 public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	void GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-	             LocalSourceState &lstate) const override;
+	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
+	                                                 GlobalSourceState &gstate) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
+
+	bool IsSource() const override {
+		return true;
+	}
+
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
+	bool ParallelSource() const override {
+		return true;
+	}
 
 public:
 	void BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) override;

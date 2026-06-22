@@ -1,17 +1,58 @@
 #include "duckdb/parser/tableref/joinref.hpp"
 
 #include "duckdb/common/limits.hpp"
-#include "duckdb/common/field_writer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 
 namespace duckdb {
 
+//! True if the join type is expressible with standard SQL JOIN syntax (e.g. INNER JOIN, LEFT JOIN).
+//! Internal join types (MARK, SINGLE, ...) instead use the JOIN BY (TYPE <type>) form.
+static bool JoinTypeUsesStandardSyntax(JoinType type) {
+	switch (type) {
+	case JoinType::INNER:
+	case JoinType::LEFT:
+	case JoinType::RIGHT:
+	case JoinType::OUTER:
+	case JoinType::SEMI:
+	case JoinType::ANTI:
+		return true;
+	default:
+		return false;
+	}
+}
+
 string JoinRef::ToString() const {
 	string result;
-	result = left->ToString() + " ";
-	if (is_natural) {
-		result += "NATURAL ";
+	if (!is_implicit) {
+		result += "(";
 	}
-	result += JoinTypeToString(type) + " JOIN ";
+	result += left->ToString() + " ";
+	switch (ref_type) {
+	case JoinRefType::REGULAR:
+		if (JoinTypeUsesStandardSyntax(type)) {
+			result += EnumUtil::ToString(type) + " JOIN ";
+		} else {
+			result += "JOIN BY (TYPE " + EnumUtil::ToString(type) + ") ";
+		}
+		break;
+	case JoinRefType::NATURAL:
+		result += "NATURAL ";
+		result += EnumUtil::ToString(type) + " JOIN ";
+		break;
+	case JoinRefType::ASOF:
+		result += "ASOF ";
+		result += EnumUtil::ToString(type) + " JOIN ";
+		break;
+	case JoinRefType::CROSS:
+		result += is_implicit ? ", " : "CROSS JOIN ";
+		break;
+	case JoinRefType::POSITIONAL:
+		result += "POSITIONAL JOIN ";
+		break;
+	case JoinRefType::DEPENDENT:
+		result += "DEPENDENT JOIN ";
+		break;
+	}
 	result += right->ToString();
 	if (condition) {
 		D_ASSERT(using_columns.empty());
@@ -24,62 +65,50 @@ string JoinRef::ToString() const {
 			if (i > 0) {
 				result += ", ";
 			}
-			result += using_columns[i];
+			result += SQLIdentifier(using_columns[i]);
 		}
+		result += ")";
+	}
+	if (!is_implicit) {
 		result += ")";
 	}
 	return result;
 }
 
-bool JoinRef::Equals(const TableRef *other_p) const {
+bool JoinRef::Equals(const TableRef &other_p) const {
 	if (!TableRef::Equals(other_p)) {
 		return false;
 	}
-	auto other = (JoinRef *)other_p;
-	if (using_columns.size() != other->using_columns.size()) {
+	auto &other = other_p.Cast<JoinRef>();
+	if (using_columns.size() != other.using_columns.size()) {
 		return false;
 	}
 	for (idx_t i = 0; i < using_columns.size(); i++) {
-		if (using_columns[i] != other->using_columns[i]) {
+		if (using_columns[i] != other.using_columns[i]) {
 			return false;
 		}
 	}
-	return left->Equals(other->left.get()) && right->Equals(other->right.get()) &&
-	       BaseExpression::Equals(condition.get(), other->condition.get()) && type == other->type;
+	return left->Equals(*other.left) && right->Equals(*other.right) &&
+	       ParsedExpression::Equals(condition, other.condition) && type == other.type;
 }
 
 unique_ptr<TableRef> JoinRef::Copy() {
-	auto copy = make_unique<JoinRef>();
+	auto copy = make_uniq<JoinRef>(ref_type);
 	copy->left = left->Copy();
 	copy->right = right->Copy();
 	if (condition) {
 		copy->condition = condition->Copy();
 	}
 	copy->type = type;
-	copy->is_natural = is_natural;
+	copy->ref_type = ref_type;
 	copy->alias = alias;
 	copy->using_columns = using_columns;
-	return move(copy);
-}
-
-void JoinRef::Serialize(FieldWriter &writer) const {
-	writer.WriteSerializable(*left);
-	writer.WriteSerializable(*right);
-	writer.WriteOptional(condition);
-	writer.WriteField<JoinType>(type);
-	writer.WriteField<bool>(is_natural);
-	writer.WriteList<string>(using_columns);
-}
-
-unique_ptr<TableRef> JoinRef::Deserialize(FieldReader &reader) {
-	auto result = make_unique<JoinRef>();
-	result->left = reader.ReadRequiredSerializable<TableRef>();
-	result->right = reader.ReadRequiredSerializable<TableRef>();
-	result->condition = reader.ReadOptional<ParsedExpression>(nullptr);
-	result->type = reader.ReadRequired<JoinType>();
-	result->is_natural = reader.ReadRequired<bool>();
-	result->using_columns = reader.ReadRequiredList<string>();
-	return move(result);
+	copy->delim_flipped = delim_flipped;
+	for (auto &col : duplicate_eliminated_columns) {
+		copy->duplicate_eliminated_columns.emplace_back(col->Copy());
+	}
+	copy->is_implicit = is_implicit;
+	return std::move(copy);
 }
 
 } // namespace duckdb

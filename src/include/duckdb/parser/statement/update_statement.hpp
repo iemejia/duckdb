@@ -16,19 +16,44 @@
 
 namespace duckdb {
 
+class Serializer;
+class Deserializer;
+
+class UpdateSetInfo {
+public:
+	UpdateSetInfo();
+
+public:
+	unique_ptr<UpdateSetInfo> Copy() const;
+	string ToString() const;
+	static bool Equals(const unique_ptr<UpdateSetInfo> &left, const unique_ptr<UpdateSetInfo> &right);
+
+	void Serialize(Serializer &serializer) const;
+	static unique_ptr<UpdateSetInfo> Deserialize(Deserializer &deserializer);
+
+public:
+	// The condition that needs to be met to perform the update
+	unique_ptr<ParsedExpression> condition;
+	// The columns to update
+	vector<Identifier> columns;
+	// The set expressions to execute
+	vector<unique_ptr<ParsedExpression>> expressions;
+
+protected:
+	UpdateSetInfo(const UpdateSetInfo &other);
+};
+
+class UpdateQueryNode;
+
 class UpdateStatement : public SQLStatement {
 public:
-	UpdateStatement();
+	static constexpr const StatementType TYPE = StatementType::UPDATE_STATEMENT;
 
-	unique_ptr<ParsedExpression> condition;
-	unique_ptr<TableRef> table;
-	unique_ptr<TableRef> from_table;
-	vector<string> columns;
-	vector<unique_ptr<ParsedExpression>> expressions;
-	//! keep track of optional returningList if statement contains a RETURNING keyword
-	vector<unique_ptr<ParsedExpression>> returning_list;
-	//! CTEs
-	CommonTableExpressionMap cte_map;
+public:
+	UpdateStatement();
+	~UpdateStatement() override;
+
+	unique_ptr<UpdateQueryNode> node;
 
 protected:
 	UpdateStatement(const UpdateStatement &other);

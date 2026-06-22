@@ -14,11 +14,18 @@ namespace duckdb {
 
 class BoundNotNullConstraint : public BoundConstraint {
 public:
+	static constexpr const ConstraintType TYPE = ConstraintType::NOT_NULL;
+
+public:
 	explicit BoundNotNullConstraint(PhysicalIndex index) : BoundConstraint(ConstraintType::NOT_NULL), index(index) {
 	}
 
 	//! Column index this constraint pertains to
 	PhysicalIndex index;
+
+	unique_ptr<BoundConstraint> Copy() const override {
+		return make_uniq<BoundNotNullConstraint>(index);
+	}
 };
 
 } // namespace duckdb

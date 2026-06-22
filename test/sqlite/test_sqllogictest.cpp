@@ -1,18 +1,19 @@
 #include "catch.hpp"
-
 #include "duckdb.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/extension/generated_extension_loader.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "test_helpers.hpp"
-
 #include "sqllogic_test_runner.hpp"
+#include "test_helpers.hpp"
+#include "test_config.hpp"
 
 #include <functional>
+#include <iostream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using namespace duckdb;
-using namespace std;
 
 // code below traverses the test directory and makes individual test cases out
 // of each script
@@ -33,23 +34,116 @@ static bool endsWith(const string &mainStr, const string &toMatch) {
 	        mainStr.compare(mainStr.size() - toMatch.size(), toMatch.size(), toMatch) == 0);
 }
 
-template <bool VERIFICATION>
+static void register_sqllogic_test_case(void (*test_fun)(), const string &path, const string &tags) {
+	auto normalized_path = StringUtil::Replace(path, "\\", "/");
+	if (TestConfiguration::Get().ShouldSkipTest(normalized_path)) {
+		return;
+	}
+	REGISTER_TEST_CASE(test_fun, normalized_path, tags);
+}
+
+template <bool AUTO_SWITCH_TEST_DIR>
+static void RunSQLLogicTest(const string &name, optional_ptr<std::istream> input) {
+	const auto test_dir_path = TestDirectoryPath(); // can vary between tests, and does IO
+	auto &test_config = TestConfiguration::Get();
+
+	string initial_dbpath = test_config.GetInitialDBPath();
+	test_config.ProcessPath(initial_dbpath, name);
+	if (!initial_dbpath.empty()) {
+		auto test_path = StringUtil::Replace(initial_dbpath, test_dir_path, string());
+		test_path = StringUtil::Replace(test_path, "\\", "/");
+		auto components = StringUtil::Split(test_path, "/");
+		components.pop_back();
+		string total_path = test_dir_path;
+		for (auto &component : components) {
+			if (component.empty()) {
+				continue;
+			}
+			total_path = TestJoinPath(total_path, component);
+			TestCreateDirectory(total_path);
+		}
+	}
+	SQLLogicTestRunner runner(std::move(initial_dbpath));
+	runner.output_sql = Catch::getCurrentContext().getConfig()->outputSQL();
+
+	string prev_directory;
+
+	// We assume the test working dir for extensions to be one dir above the test/sql. Note that this is very hacky.
+	// however for now it suffices: we use it to run tests from out-of-tree extensions that are based on the extension
+	// template which adheres to this convention.
+	if (!input && AUTO_SWITCH_TEST_DIR) {
+		prev_directory = TestGetCurrentDirectory();
+
+		std::size_t found = name.rfind("/test/sql");
+		if (found == std::string::npos) {
+			throw InvalidInputException("Failed to auto detect working dir for test '" + name +
+			                            "' because a non-standard path was used!");
+		}
+		auto test_working_dir = name.substr(0, found);
+		test_config.ChangeWorkingDirectory(test_working_dir);
+	}
+
+	// setup this test runner with Config-based env, then override with ephemerals (only WORKING_DIR at this point)
+	for (auto &kv : test_config.GetTestEnvMap()) {
+		runner.environment_variables[kv.first] = kv.second;
+	}
+	// Per runner vars
+	runner.environment_variables["WORKING_DIR"] = TestGetCurrentDirectory();
+	runner.environment_variables["TEST_NAME"] = name;
+	runner.environment_variables["TEST_NAME__NO_SLASH"] = StringUtil::Replace(name, "/", "_");
+
+	ErrorData error;
+	try {
+		if (input) {
+			runner.ExecuteStream(*input, name);
+		} else {
+			runner.ExecuteFile(name);
+		}
+	} catch (std::exception &ex) {
+		error = ErrorData(ex);
+	}
+
+	if (!input && AUTO_SWITCH_TEST_DIR) {
+		test_config.ChangeWorkingDirectory(prev_directory);
+	}
+
+	auto on_cleanup = test_config.OnCleanupCommand();
+	if (!on_cleanup.empty() && runner.db) {
+		// perform clean-up if any is defined
+		try {
+			if (!runner.con) {
+				runner.Reconnect();
+			}
+			auto res = runner.con->Query(on_cleanup);
+			if (res->HasError()) {
+				res->GetErrorObject().Throw();
+			}
+		} catch (std::exception &ex) {
+			string cleanup_failure = "Error while running clean-up routine:\n";
+			ErrorData error(ex);
+			cleanup_failure += error.Message();
+			FAIL(cleanup_failure);
+		}
+	}
+
+	// clear test directory after running tests
+	ClearTestDirectory();
+
+	if (error.HasError()) {
+		FAIL(error.Message());
+	}
+}
+
+template <bool AUTO_SWITCH_TEST_DIR = false>
 static void testRunner() {
 	// this is an ugly hack that uses the test case name to pass the script file
 	// name if someone has a better idea...
-	auto name = Catch::getResultCapture().getCurrentTestName();
-	// fprintf(stderr, "%s\n", name.c_str());
-	string initial_dbpath;
-	if (TestForceStorage()) {
-		auto storage_name = StringUtil::Replace(name, "/", "_");
-		storage_name = StringUtil::Replace(storage_name, ".", "_");
-		storage_name = StringUtil::Replace(storage_name, "\\", "_");
-		initial_dbpath = TestCreatePath(storage_name + ".db");
-	}
-	SQLLogicTestRunner runner(move(initial_dbpath));
-	runner.output_sql = Catch::getCurrentContext().getConfig()->outputSQL();
-	runner.enable_verification = VERIFICATION;
-	runner.ExecuteFile(name);
+	const auto name = Catch::getResultCapture().getCurrentTestName();
+	RunSQLLogicTest<AUTO_SWITCH_TEST_DIR>(name, nullptr);
+}
+
+static void testRunnerFromStdin() {
+	RunSQLLogicTest<false>("<stdin>", &std::cin);
 }
 
 static string ParseGroupFromPath(string file) {
@@ -59,7 +153,7 @@ static string ParseGroupFromPath(string file) {
 		extension = "[.]";
 	}
 	if (file.find(".test_coverage") != std::string::npos) {
-		// "slow" in the name indicates a slow test (i.e. only run as part of allunit)
+		// "coverage" in the name indicates a coverage test (i.e. only run as part of coverage)
 		return "[coverage][.]";
 	}
 	// move backwards to the last slash
@@ -83,43 +177,6 @@ static string ParseGroupFromPath(string file) {
 namespace duckdb {
 
 void RegisterSqllogictests() {
-	vector<string> enable_verification_excludes = {
-	    // too slow for verification
-	    "test/select5.test",
-	    "test/index",
-	    // optimization masks int32 overflow
-	    "test/random/aggregates/slt_good_102.test",
-	    "test/random/aggregates/slt_good_11.test",
-	    "test/random/aggregates/slt_good_115.test",
-	    "test/random/aggregates/slt_good_116.test",
-	    "test/random/aggregates/slt_good_118.test",
-	    "test/random/aggregates/slt_good_119.test",
-	    "test/random/aggregates/slt_good_122.test",
-	    "test/random/aggregates/slt_good_17.test",
-	    "test/random/aggregates/slt_good_20.test",
-	    "test/random/aggregates/slt_good_23.test",
-	    "test/random/aggregates/slt_good_25.test",
-	    "test/random/aggregates/slt_good_3.test",
-	    "test/random/aggregates/slt_good_30.test",
-	    "test/random/aggregates/slt_good_31.test",
-	    "test/random/aggregates/slt_good_38.test",
-	    "test/random/aggregates/slt_good_39.test",
-	    "test/random/aggregates/slt_good_4.test",
-	    "test/random/aggregates/slt_good_43.test",
-	    "test/random/aggregates/slt_good_46.test",
-	    "test/random/aggregates/slt_good_51.test",
-	    "test/random/aggregates/slt_good_56.test",
-	    "test/random/aggregates/slt_good_66.test",
-	    "test/random/aggregates/slt_good_7.test",
-	    "test/random/aggregates/slt_good_72.test",
-	    "test/random/aggregates/slt_good_82.test",
-	    "test/random/aggregates/slt_good_84.test",
-	    "test/random/aggregates/slt_good_85.test",
-	    "test/random/aggregates/slt_good_91.test",
-	    "test/random/expr/slt_good_15.test",
-	    "test/random/expr/slt_good_66.test",
-	    "test/random/expr/slt_good_91.test",
-	};
 	vector<string> excludes = {
 	    // tested separately
 	    "test/select1.test", "test/select2.test", "test/select3.test", "test/select4.test",
@@ -148,9 +205,18 @@ void RegisterSqllogictests() {
 	    "test/random/expr/slt_good_80.test", "test/random/expr/slt_good_75.test", "test/random/expr/slt_good_42.test",
 	    "test/random/expr/slt_good_49.test", "test/random/expr/slt_good_24.test", "test/random/expr/slt_good_30.test",
 	    "test/random/expr/slt_good_8.test", "test/random/expr/slt_good_61.test",
+	    // dependencies between tables/views prevent dropping in DuckDB without CASCADE
+	    "test/index/view/1000/slt_good_0.test", "test/index/view/100/slt_good_0.test",
+	    "test/index/view/100/slt_good_5.test", "test/index/view/100/slt_good_1.test",
+	    "test/index/view/100/slt_good_3.test", "test/index/view/100/slt_good_4.test",
+	    "test/index/view/100/slt_good_2.test", "test/index/view/10000/slt_good_0.test",
+	    "test/index/view/10/slt_good_5.test", "test/index/view/10/slt_good_7.test",
+	    "test/index/view/10/slt_good_1.test", "test/index/view/10/slt_good_3.test",
+	    "test/index/view/10/slt_good_4.test", "test/index/view/10/slt_good_6.test",
+	    "test/index/view/10/slt_good_2.test",
 	    // strange error in hash comparison, results appear correct...
 	    "test/index/random/10/slt_good_7.test", "test/index/random/10/slt_good_9.test"};
-	unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
+	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
 	listFiles(*fs, fs->JoinPath(fs->JoinPath("third_party", "sqllogictest"), "test"), [&](const string &path) {
 		if (endsWith(path, ".test")) {
 			for (auto &excl : excludes) {
@@ -158,25 +224,27 @@ void RegisterSqllogictests() {
 					return;
 				}
 			}
-			bool enable_verification = true;
-			for (auto &excl : enable_verification_excludes) {
-				if (path.find(excl) != string::npos) {
-					enable_verification = false;
-					break;
-				}
-			}
-			if (enable_verification) {
-				REGISTER_TEST_CASE(testRunner<true>, StringUtil::Replace(path, "\\", "/"), "[sqlitelogic][.]");
-			} else {
-				REGISTER_TEST_CASE(testRunner<false>, StringUtil::Replace(path, "\\", "/"), "[sqlitelogic][.]");
-			}
+			register_sqllogic_test_case(testRunner<>, path, "[sqlitelogic][.]");
 		}
 	});
 	listFiles(*fs, "test", [&](const string &path) {
 		if (endsWith(path, ".test") || endsWith(path, ".test_slow") || endsWith(path, ".test_coverage")) {
 			// parse the name / group from the test
-			REGISTER_TEST_CASE(testRunner<false>, StringUtil::Replace(path, "\\", "/"), ParseGroupFromPath(path));
+			register_sqllogic_test_case(testRunner<false>, path, ParseGroupFromPath(path));
 		}
 	});
+
+	for (const auto &extension_test_path : ExtensionHelper::LoadedExtensionTestPaths()) {
+		listFiles(*fs, extension_test_path, [&](const string &path) {
+			if (endsWith(path, ".test") || endsWith(path, ".test_slow") || endsWith(path, ".test_coverage")) {
+				auto fun = testRunner<true>;
+				register_sqllogic_test_case(fun, path, ParseGroupFromPath(path));
+			}
+		});
+	}
+}
+
+void RegisterSqllogictestStdin() {
+	register_sqllogic_test_case(testRunnerFromStdin, "<stdin>", "[sqlitelogic][stdin]");
 }
 } // namespace duckdb

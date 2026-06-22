@@ -3,9 +3,6 @@
 # group: [pragma]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE integers(i INTEGER, j INTEGER)
 
 statement ok
@@ -23,10 +20,12 @@ CREATE VIEW v1 AS SELECT 42
 
 statement error
 PRAGMA storage_info('v1')
+----
 
 # non-existent table
 statement error
 PRAGMA storage_info('bla')
+----
 
 # different types
 statement ok

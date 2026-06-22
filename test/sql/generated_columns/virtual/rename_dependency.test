@@ -3,9 +3,6 @@
 # group: [virtual]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE unit (
 	price INTEGER,
 	amount_sold INTEGER,
@@ -28,6 +25,7 @@ ALTER TABLE unit RENAME COLUMN price TO value
 # No CASCADE provided
 statement error
 ALTER TABLE unit DROP COLUMN value;
+----
 
 query IIIII
 SELECT * FROM unit

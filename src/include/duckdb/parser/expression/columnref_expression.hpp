@@ -12,38 +12,55 @@
 #include "duckdb/common/vector.hpp"
 
 namespace duckdb {
+struct BindingAlias;
 
 //! Represents a reference to a column from either the FROM clause or from an
 //! alias
 class ColumnRefExpression : public ParsedExpression {
 public:
-	//! Specify both the column and table name
-	ColumnRefExpression(string column_name, string table_name);
-	//! Only specify the column name, the table name will be derived later
-	explicit ColumnRefExpression(string column_name);
-	//! Specify a set of names
-	explicit ColumnRefExpression(vector<string> column_names);
-
-	//! The stack of names in order of which they appear (column_names[0].column_names[1].column_names[2]....)
-	vector<string> column_names;
+	static constexpr const ExpressionClass TYPE = ExpressionClass::COLUMN_REF;
 
 public:
+	//! Specify both the column and table name
+	ColumnRefExpression(Identifier column_name, Identifier table_name);
+	//! Specify both the column and table alias
+	ColumnRefExpression(Identifier column_name, const BindingAlias &alias);
+	//! Only specify the column name, the table name will be derived later
+	explicit ColumnRefExpression(Identifier column_name);
+	//! Specify a set of names
+	explicit ColumnRefExpression(vector<Identifier> column_names);
+
+public:
+	const vector<Identifier> &ColumnNames() const {
+		return column_names;
+	}
+	vector<Identifier> &ColumnNamesMutable() {
+		return column_names;
+	}
+
 	bool IsQualified() const;
-	const string &GetColumnName() const;
-	const string &GetTableName() const;
+	const Identifier &GetColumnName() const;
+	const Identifier &GetTableName() const;
 	bool IsScalar() const override {
 		return false;
 	}
 
-	string GetName() const override;
+	Identifier GetName() const override;
 	string ToString() const override;
 
-	static bool Equals(const ColumnRefExpression *a, const ColumnRefExpression *b);
+	bool Equals(const ParsedExpression &other) const override;
 	hash_t Hash() const override;
 
 	unique_ptr<ParsedExpression> Copy() const override;
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<ParsedExpression> Deserialize(ExpressionType type, FieldReader &source);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ParsedExpression> Deserialize(Deserializer &deserializer);
+
+private:
+	//! The stack of names in order of which they appear (column_names[0].column_names[1].column_names[2]....)
+	vector<Identifier> column_names;
+
+private:
+	ColumnRefExpression();
 };
 } // namespace duckdb

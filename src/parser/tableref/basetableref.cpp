@@ -1,49 +1,44 @@
 #include "duckdb/parser/tableref/basetableref.hpp"
 
-#include "duckdb/common/field_writer.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
 
 namespace duckdb {
 
 string BaseTableRef::ToString() const {
-	string schema = schema_name.empty() ? "" : KeywordHelper::WriteOptionallyQuoted(schema_name) + ".";
-	string result = schema + KeywordHelper::WriteOptionallyQuoted(table_name);
-	return BaseToString(result, column_name_alias);
+	string result;
+	result += catalog_name.empty() ? "" : (SQLIdentifier(catalog_name) + ".");
+	result += schema_name.empty() ? "" : (SQLIdentifier(schema_name) + ".");
+	result += SQLIdentifier(table_name);
+	result += AliasToString(column_name_alias);
+	if (at_clause) {
+		result += " " + at_clause->ToString();
+	}
+	result += SampleToString();
+	return result;
 }
 
-bool BaseTableRef::Equals(const TableRef *other_p) const {
+bool BaseTableRef::Equals(const TableRef &other_p) const {
 	if (!TableRef::Equals(other_p)) {
 		return false;
 	}
-	auto other = (BaseTableRef *)other_p;
-	return other->schema_name == schema_name && other->table_name == table_name &&
-	       column_name_alias == other->column_name_alias;
-}
-
-void BaseTableRef::Serialize(FieldWriter &writer) const {
-	writer.WriteString(schema_name);
-	writer.WriteString(table_name);
-	writer.WriteList<string>(column_name_alias);
-}
-
-unique_ptr<TableRef> BaseTableRef::Deserialize(FieldReader &reader) {
-	auto result = make_unique<BaseTableRef>();
-
-	result->schema_name = reader.ReadRequired<string>();
-	result->table_name = reader.ReadRequired<string>();
-	result->column_name_alias = reader.ReadRequiredList<string>();
-
-	return move(result);
+	auto &other = other_p.Cast<BaseTableRef>();
+	return other.catalog_name == catalog_name && other.schema_name == schema_name && other.table_name == table_name &&
+	       column_name_alias == other.column_name_alias && AtClause::Equals(at_clause.get(), other.at_clause.get());
 }
 
 unique_ptr<TableRef> BaseTableRef::Copy() {
-	auto copy = make_unique<BaseTableRef>();
+	auto copy = make_uniq<BaseTableRef>();
 
+	copy->catalog_name = catalog_name;
 	copy->schema_name = schema_name;
 	copy->table_name = table_name;
 	copy->column_name_alias = column_name_alias;
+	copy->at_clause = at_clause ? at_clause->Copy() : nullptr;
 	CopyProperties(*copy);
 
-	return move(copy);
+	return std::move(copy);
 }
+
 } // namespace duckdb

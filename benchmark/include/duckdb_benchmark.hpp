@@ -15,6 +15,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "test_helpers.hpp"
 #include "duckdb/main/query_profiler.hpp"
+#include "duckdb/common/helper.hpp"
 
 namespace duckdb {
 
@@ -22,11 +23,15 @@ namespace duckdb {
 struct DuckDBBenchmarkState : public BenchmarkState {
 	DuckDB db;
 	Connection conn;
-	unique_ptr<QueryResult> result;
+	duckdb::unique_ptr<QueryResult> result;
 
 	DuckDBBenchmarkState(string path) : db(path.empty() ? nullptr : path.c_str()), conn(db) {
 		auto &instance = BenchmarkRunner::GetInstance();
 		auto res = conn.Query("PRAGMA threads=" + to_string(instance.threads));
+		if (!instance.memory_limit.empty()) {
+			res = conn.Query("PRAGMA memory_limit='" + instance.memory_limit + "'");
+			D_ASSERT(!res->HasError());
+		}
 		D_ASSERT(!res->HasError());
 		string profiling_mode;
 		switch (instance.configuration.profile_info) {
@@ -84,14 +89,14 @@ public:
 		}
 	}
 
-	virtual unique_ptr<DuckDBBenchmarkState> CreateBenchmarkState() {
-		return make_unique<DuckDBBenchmarkState>(GetDatabasePath());
+	virtual duckdb::unique_ptr<DuckDBBenchmarkState> CreateBenchmarkState() {
+		return make_uniq<DuckDBBenchmarkState>(GetDatabasePath());
 	}
 
-	unique_ptr<BenchmarkState> Initialize(BenchmarkConfiguration &config) override {
+	duckdb::unique_ptr<BenchmarkState> Initialize(BenchmarkConfiguration &config) override {
 		auto state = CreateBenchmarkState();
 		Load(state.get());
-		return move(state);
+		return std::move(state);
 	}
 
 	void Run(BenchmarkState *state_p) override {

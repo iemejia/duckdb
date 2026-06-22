@@ -3,9 +3,6 @@
 # group: [virtual]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE unit (
 	price INTEGER,
 	amount_sold INTEGER,
@@ -23,6 +20,7 @@ SELECT total_profit FROM unit
 # Dependency of 'total_price' - the change is prohibited
 statement error
 ALTER TABLE unit ALTER COLUMN price TYPE BOOLEAN;
+----
 
 # Generated column isn't deleted
 statement ok

@@ -8,52 +8,57 @@
 
 #pragma once
 
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/common.hpp"
-#include "duckdb/common/enums/output_type.hpp"
-#include "duckdb/common/types/value.hpp"
-#include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
+
+class AttachedDatabase;
 class BufferedFileWriter;
 class ClientContext;
 class CatalogSearchPath;
 class FileOpener;
+class FileSystem;
 class QueryProfiler;
-class QueryProfilerHistory;
 class PreparedStatementData;
-class SchemaCatalogEntry;
-struct RandomEngine;
+class RandomEngine;
+class BufferManager;
 
 struct ClientData {
-	ClientData(ClientContext &context);
+public:
+	explicit ClientData(ClientContext &context);
 	~ClientData();
 
-	//! Query profiler
+public:
+	//! The query profiler of this client.
 	shared_ptr<QueryProfiler> profiler;
-	//! QueryProfiler History
-	unique_ptr<QueryProfilerHistory> query_profiler_history;
 
-	//! The set of temporary objects that belong to this client
-	shared_ptr<SchemaCatalogEntry> temporary_objects;
-	//! The set of bound prepared statements that belong to this client
-	unordered_map<string, shared_ptr<PreparedStatementData>> prepared_statements;
+	//! The set of temporary objects belonging to this client.
+	shared_ptr<AttachedDatabase> temporary_objects;
+	//! The set of bound prepared statements belonging to this client.
+	identifier_map_t<shared_ptr<PreparedStatementData>> prepared_statements;
 
-	//! The writer used to log queries (if logging is enabled)
-	unique_ptr<BufferedFileWriter> log_query_writer;
-	//! The random generator used by random(). Its seed value can be set by setseed().
+	//! The random generator used by random().
+	//! Its seed value can be set by setseed().
 	unique_ptr<RandomEngine> random_engine;
 
-	//! The catalog search path
+	//! The catalog search path.
 	unique_ptr<CatalogSearchPath> catalog_search_path;
 
-	//! The file opener of the client context
+	//! The file opener of the client context.
 	unique_ptr<FileOpener> file_opener;
+	//! The clients' file system wrapper.
+	unique_ptr<FileSystem> client_file_system;
+	//! The clients' buffer manager wrapper.
+	unique_ptr<BufferManager> client_buffer_manager;
 
-	//! The file search path
-	string file_search_path;
+	//! The writer used to log queries, if logging is enabled.
+	//! DEPRECATED: Now, queries are written to the generic log.
+	unique_ptr<BufferedFileWriter> log_query_writer;
 
 public:
 	DUCKDB_API static ClientData &Get(ClientContext &context);
+	DUCKDB_API static const ClientData &Get(const ClientContext &context);
 };
 
 } // namespace duckdb

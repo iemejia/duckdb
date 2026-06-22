@@ -2,6 +2,9 @@
 # description: Test RENAME TABLE two parallel transactions
 # group: [rename_table]
 
+statement ok
+SET default_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
 statement ok con1
 CREATE TABLE tbl(i INTEGER)
 
@@ -25,6 +28,8 @@ SELECT * FROM tbl2
 
 statement error con1
 SELECT * FROM tbl
+----
+Catalog Error: Table with name tbl does not exist
 
 query I con2
 SELECT * FROM tbl
@@ -34,6 +39,8 @@ SELECT * FROM tbl
 
 statement error con2
 SELECT * FROM tbl2
+----
+Catalog Error: Table with name tbl2 does not exist
 
 statement ok con1
 COMMIT
@@ -43,9 +50,13 @@ COMMIT
 
 statement error con1
 SELECT * FROM tbl
+----
+Catalog Error: Table with name tbl does not exist
 
 statement error con2
 SELECT * FROM tbl
+----
+Catalog Error: Table with name tbl does not exist
 
 query I con1
 SELECT * FROM tbl2
@@ -66,6 +77,8 @@ CREATE TABLE tbl(i INTEGER);
 # tbl2 is still occupied though
 statement error con1
 CREATE TABLE tbl2(i INTEGER);
+----
+Catalog Error: Table with name "tbl2" already exists
 
 # we can drop and re-create the table
 statement ok con1
@@ -77,3 +90,5 @@ CREATE TABLE tbl2(i INTEGER);
 # a rename fails now
 statement error con1
 ALTER TABLE tbl RENAME TO tbl2
+----
+Catalog Error: Could not rename "tbl" to "tbl2"

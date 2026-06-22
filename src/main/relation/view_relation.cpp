@@ -7,26 +7,44 @@
 
 namespace duckdb {
 
-ViewRelation::ViewRelation(const std::shared_ptr<ClientContext> &context, string schema_name_p, string view_name_p)
-    : Relation(context, RelationType::VIEW_RELATION), schema_name(move(schema_name_p)), view_name(move(view_name_p)) {
-	context->TryBindRelation(*this, this->columns);
+ViewRelation::ViewRelation(const shared_ptr<ClientContext> &context, Identifier schema_name_p, Identifier view_name_p)
+    : Relation(context, RelationType::VIEW_RELATION), schema_name(std::move(schema_name_p)),
+      view_name(std::move(view_name_p)) {
+	TryBindRelation(columns);
+}
+
+ViewRelation::ViewRelation(const shared_ptr<RelationContextWrapper> &context, Identifier schema_name_p,
+                           Identifier view_name_p)
+    : Relation(context, RelationType::VIEW_RELATION), schema_name(std::move(schema_name_p)),
+      view_name(std::move(view_name_p)) {
+	TryBindRelation(columns);
+}
+
+ViewRelation::ViewRelation(const shared_ptr<ClientContext> &context, unique_ptr<TableRef> ref, const string &view_name)
+    : Relation(context, RelationType::VIEW_RELATION), view_name(view_name), premade_tableref(std::move(ref)) {
+	TryBindRelation(columns);
+	premade_tableref->alias = Identifier(view_name);
 }
 
 unique_ptr<QueryNode> ViewRelation::GetQueryNode() {
-	auto result = make_unique<SelectNode>();
-	result->select_list.push_back(make_unique<StarExpression>());
+	auto result = make_uniq<SelectNode>();
+	result->select_list.push_back(make_uniq<StarExpression>());
 	result->from_table = GetTableRef();
-	return move(result);
+	return std::move(result);
 }
 
 unique_ptr<TableRef> ViewRelation::GetTableRef() {
-	auto table_ref = make_unique<BaseTableRef>();
+	if (premade_tableref) {
+		return premade_tableref->Copy();
+	}
+	auto table_ref = make_uniq<BaseTableRef>();
 	table_ref->schema_name = schema_name;
 	table_ref->table_name = view_name;
-	return move(table_ref);
+	return std::move(table_ref);
 }
 
-string ViewRelation::GetAlias() {
+Identifier ViewRelation::GetAlias() {
+	D_ASSERT(!view_name.empty());
 	return view_name;
 }
 

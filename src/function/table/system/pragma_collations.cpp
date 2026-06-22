@@ -24,30 +24,30 @@ static unique_ptr<FunctionData> PragmaCollateBind(ClientContext &context, TableF
 }
 
 unique_ptr<GlobalTableFunctionState> PragmaCollateInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto result = make_unique<PragmaCollateData>();
+	auto result = make_uniq<PragmaCollateData>();
 
-	Catalog::GetCatalog(context).schemas->Scan(context, [&](CatalogEntry *entry) {
-		auto schema = (SchemaCatalogEntry *)entry;
-		schema->Scan(context, CatalogType::COLLATION_ENTRY,
-		             [&](CatalogEntry *entry) { result->entries.push_back(entry->name); });
-	});
-
-	return move(result);
+	auto schemas = Catalog::GetAllSchemas(context);
+	for (auto schema : schemas) {
+		schema.get().Scan(context, CatalogType::COLLATION_ENTRY,
+		                  [&](CatalogEntry &entry) { result->entries.push_back(entry.name.GetIdentifierName()); });
+	}
+	return std::move(result);
 }
 
 static void PragmaCollateFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = (PragmaCollateData &)*data_p.global_state;
+	auto &data = data_p.global_state->Cast<PragmaCollateData>();
 	if (data.offset >= data.entries.size()) {
 		// finished returning values
 		return;
 	}
 	idx_t next = MinValue<idx_t>(data.offset + STANDARD_VECTOR_SIZE, data.entries.size());
-	output.SetCardinality(next - data.offset);
-	for (idx_t i = data.offset; i < next; i++) {
-		auto index = i - data.offset;
-		output.SetValue(0, index, Value(data.entries[i]));
-	}
 
+	// collname, VARCHAR
+	auto &collname = output.data[0];
+
+	for (idx_t i = data.offset; i < next; i++) {
+		collname.Append(Value(data.entries[i]));
+	}
 	data.offset = next;
 }
 

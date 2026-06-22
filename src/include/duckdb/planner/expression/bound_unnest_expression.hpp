@@ -15,20 +15,30 @@ namespace duckdb {
 //! Represents a function call that has been bound to a base function
 class BoundUnnestExpression : public Expression {
 public:
-	explicit BoundUnnestExpression(LogicalType return_type);
-
-	unique_ptr<Expression> child;
+	static constexpr const ExpressionClass TYPE = ExpressionClass::BOUND_UNNEST;
 
 public:
+	explicit BoundUnnestExpression(LogicalType return_type);
+
+public:
+	const unique_ptr<Expression> &Child() const {
+		return child;
+	}
+	unique_ptr<Expression> &ChildMutable() {
+		return child;
+	}
 	bool IsFoldable() const override;
 	string ToString() const override;
 
 	hash_t Hash() const override;
-	bool Equals(const BaseExpression *other) const override;
+	bool Equals(const BaseExpression &other) const override;
 
-	unique_ptr<Expression> Copy() override;
+	unique_ptr<Expression> Copy() const override;
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<Expression> Deserialize(ExpressionDeserializationState &state, FieldReader &reader);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<Expression> Deserialize(Deserializer &deserializer);
+
+private:
+	unique_ptr<Expression> child;
 };
 } // namespace duckdb

@@ -2,11 +2,8 @@
 # description: Test case insensitive operations
 # group: [catalog]
 
-require skip_reload
-
-
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 loop i 0 2
 
@@ -57,6 +54,7 @@ WITH "CTE"("ZZZ") AS (
 	SELECT integers.i AS "ZZZ" FROM integers GROUP BY "zzz"
 ),
 	"cte" AS (SELECT 42)
+----
 
 query I
 UPDATE integers SET i=integers.i+1

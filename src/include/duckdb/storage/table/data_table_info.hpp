@@ -8,36 +8,74 @@
 
 #pragma once
 
-#include "duckdb/common/atomic.hpp"
-#include "duckdb/common/common.hpp"
+#include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/table_index_list.hpp"
 
 namespace duckdb {
+class AttachedDatabase;
 class DatabaseInstance;
 class TableIOManager;
+class RowGroupCollection;
 
 struct DataTableInfo {
-	DataTableInfo(DatabaseInstance &db, shared_ptr<TableIOManager> table_io_manager_p, string schema, string table)
-	    : db(db), table_io_manager(move(table_io_manager_p)), cardinality(0), schema(move(schema)), table(move(table)) {
+	friend class DataTable;
+
+public:
+	DataTableInfo(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_manager_p, Identifier schema,
+	              Identifier table);
+
+	//! Bind unknown indexes throwing an exception if binding fails.
+	//! Only binds the specified index type, or all, if nullptr.
+	void BindIndexes(ClientContext &context, const char *index_type = nullptr);
+
+	//! Whether or not the table is temporary
+	bool IsTemporary() const;
+
+	AttachedDatabase &GetDB() const {
+		return db;
 	}
 
+	TableIOManager &GetIOManager() {
+		return *table_io_manager;
+	}
+
+	TableIndexList &GetIndexes() {
+		return indexes;
+	}
+	//! Find and move out an IndexStorageInfo by name from the stored collection.
+	IndexStorageInfo ExtractIndexStorageInfo(const Identifier &name);
+	unique_ptr<StorageLockKey> GetSharedLock() {
+		return checkpoint_lock.GetSharedLock();
+	}
+	bool AppendRequiresNewRowGroup(RowGroupCollection &collection, transaction_t checkpoint_id);
+	optional_idx CheckpointRowGroupCount(const CheckpointOptions &options) const;
+	void VerifyIndexBuffers();
+
+	Identifier GetSchemaName();
+	Identifier GetTableName();
+	void SetTableName(Identifier name);
+
+private:
 	//! The database instance of the table
-	DatabaseInstance &db;
+	AttachedDatabase &db;
 	//! The table IO manager
 	shared_ptr<TableIOManager> table_io_manager;
-	//! The amount of elements in the table. Note that this number signifies the amount of COMMITTED entries in the
-	//! table. It can be inaccurate inside of transactions. More work is needed to properly support that.
-	atomic<idx_t> cardinality;
-	// schema of the table
-	string schema;
-	// name of the table
-	string table;
-
+	//! Lock for modifying the name
+	mutex name_lock;
+	//! The schema of the table
+	Identifier schema;
+	//! The name of the table
+	Identifier table;
+	//! The physical list of indexes of this table
 	TableIndexList indexes;
-
-	bool IsTemporary() {
-		return schema == TEMP_SCHEMA;
-	}
+	//! Index storage information of the indexes created by this table
+	vector<IndexStorageInfo> index_storage_infos;
+	//! Lock held while checkpointing
+	StorageLock checkpoint_lock;
+	//! The last seen checkpoint while doing a concurrent operation, if any
+	optional_idx last_seen_checkpoint;
+	//! The amount of row groups the checkpoint is processing
+	optional_idx checkpoint_row_group_count;
 };
 
 } // namespace duckdb

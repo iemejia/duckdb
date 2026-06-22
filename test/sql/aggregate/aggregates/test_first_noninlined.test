@@ -3,6 +3,9 @@
 # group: [aggregates]
 
 statement ok
+SET debug_force_external=true;
+
+statement ok
 CREATE TABLE tbl(a INTEGER, b VARCHAR)
 
 statement ok

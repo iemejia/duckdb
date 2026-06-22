@@ -3,7 +3,7 @@
 namespace duckdb {
 
 VacuumStatement::VacuumStatement(const VacuumOptions &options)
-    : SQLStatement(StatementType::VACUUM_STATEMENT), info(make_unique<VacuumInfo>(options)) {
+    : SQLStatement(StatementType::VACUUM_STATEMENT), info(make_uniq<VacuumInfo>(options)) {
 }
 
 VacuumStatement::VacuumStatement(const VacuumStatement &other) : SQLStatement(other), info(other.info->Copy()) {
@@ -11,6 +11,10 @@ VacuumStatement::VacuumStatement(const VacuumStatement &other) : SQLStatement(ot
 
 unique_ptr<SQLStatement> VacuumStatement::Copy() const {
 	return unique_ptr<VacuumStatement>(new VacuumStatement(*this));
+}
+
+string VacuumStatement::ToString() const {
+	return info->ToString();
 }
 
 } // namespace duckdb

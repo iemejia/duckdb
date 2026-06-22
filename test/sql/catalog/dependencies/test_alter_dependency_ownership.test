@@ -4,7 +4,6 @@
 
 require skip_reload
 
-
 ##TEST: If the table is dropped, then the sequence is also droppped
 statement ok
 CREATE SEQUENCE sequence1;
@@ -22,6 +21,8 @@ DROP TABLE tablename;
 
 statement error
 SELECT nextval('sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 ##TEST: If the table is dropped, then the sequence is also droppped, using schemas
 statement ok
@@ -40,6 +41,8 @@ DROP TABLE main.tablename;
 
 statement error
 SELECT nextval('main.sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 ##TEST: If the owned sequence is dropped with CASCADE, then the table is also dropped
 statement ok
@@ -58,6 +61,8 @@ DROP SEQUENCE sequence1 CASCADE;
 
 statement error
 SELECT * FROM tablename;
+----
+Catalog Error: Table with name tablename does not exist!
 
 ##TEST: The owned sequence cannot be dropped without CASCADE
 statement ok
@@ -73,6 +78,8 @@ ALTER SEQUENCE sequence1 OWNED BY tablename;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 DROP TABLE tablename;
@@ -94,12 +101,16 @@ CREATE TABLE tablename2 (
 # owned by specified more than once
 statement error
 ALTER SEQUENCE sequence1 OWNED BY tablename OWNED BY tablename2;
+----
+Parser Error: Owned by value should be passed at most once
 
 statement ok
 ALTER SEQUENCE sequence1 OWNED BY tablename;
 
 statement error
 ALTER SEQUENCE sequence1 OWNED BY tablename2;
+----
+Dependency Error: sequence1 is already owned by tablename
 
 statement ok
 DROP TABLE tablename;
@@ -154,12 +165,18 @@ DROP TABLE tablename;
 
 statement error
 SELECT nextval('sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 statement error
 SELECT nextval('sequence2');
+----
+Catalog Error: Sequence with name sequence2 does not exist!
 
 statement error
 SELECT nextval('sequence3');
+----
+Catalog Error: Sequence with name sequence3 does not exist!
 
 ##TEST: When owning a sequence, insertions work normally
 statement ok
@@ -222,9 +239,18 @@ CREATE TABLE tablename (
 
 statement error
 ALTER SEQUENCE sequence1 OWNED BY tablename;
+----
+sequence1 is already owned by new_tablename
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "new_tablename" depends on sequence "sequence1".
+
+statement error
+CREATE OR REPLACE SEQUENCE sequence1;
+----
+table "new_tablename" depends on sequence "sequence1".
 
 # Owning the sequence with the same table shouldn't return any error
 statement ok
@@ -256,6 +282,8 @@ ALTER SEQUENCE sequence1 OWNED BY tablename;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 DROP TABLE tablename;
@@ -278,6 +306,8 @@ ALTER TABLE tablename DROP colname2;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 DROP TABLE tablename;
@@ -299,6 +329,8 @@ ALTER TABLE tablename ALTER colname TYPE float;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 DROP TABLE tablename;
@@ -323,18 +355,24 @@ ALTER TABLE tablename DROP colname4;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 ALTER TABLE tablename DROP colname3;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 ALTER TABLE tablename DROP colname2;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 DROP TABLE tablename;
@@ -359,6 +397,8 @@ DROP TABLE tablename;
 
 statement error
 select nextval('sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 statement ok
 ROLLBACK;
@@ -370,6 +410,8 @@ select nextval('sequence1');
 
 statement error
 DROP SEQUENCE sequence1;
+----
+table "tablename" depends on sequence "sequence1".
 
 statement ok
 DROP TABLE tablename;
@@ -386,12 +428,16 @@ ALTER SEQUENCE sequence1 OWNED BY v1_sequence1;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+view "v1_sequence1" depends on sequence "sequence1".
 
 statement ok
 DROP VIEW v1_sequence1;
 
 statement error
 SELECT nextval('sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 ##TEST: Sequence can own a sequence
 statement ok
@@ -405,12 +451,16 @@ ALTER SEQUENCE sequence1 OWNED BY sequence2;
 
 statement error
 DROP SEQUENCE sequence1;
+----
+sequence "sequence2" depends on sequence "sequence1".
 
 statement ok
 DROP SEQUENCE sequence2;
 
 statement error
 SELECT nextval('sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 ##TEST: Sequence cant own its owner
 statement ok
@@ -424,6 +474,8 @@ ALTER SEQUENCE sequence1 OWNED BY sequence2;
 
 statement error
 ALTER SEQUENCE sequence2 OWNED BY sequence1;
+----
+Dependency Error: sequence1 can not become the owner, it is already owned by sequence2
 
 statement ok
 DROP SEQUENCE sequence2;
@@ -446,9 +498,15 @@ ALTER SEQUENCE sequence2 OWNED BY sequence1;
 
 statement error
 ALTER SEQUENCE sequence3 OWNED BY sequence2;
+----
+Dependency Error: sequence2 can not become the owner, it is already owned by sequence1
 
+# FIXME: this error makes no sense, if there is no circular dependency
+# this should be allowed
 statement error
 ALTER SEQUENCE sequence1 OWNED BY sequence3;
+----
+Dependency Error: sequence1 already owns sequence2. Cannot have circular dependencies
 
 statement ok
 ALTER SEQUENCE sequence3 OWNED BY sequence4;
@@ -461,12 +519,20 @@ DROP SEQUENCE sequence4;
 
 statement error
 SELECT nextval('sequence1');
+----
+Catalog Error: Sequence with name sequence1 does not exist!
 
 statement error
 SELECT nextval('sequence2');
+----
+Catalog Error: Sequence with name sequence2 does not exist!
 
 statement error
 SELECT nextval('sequence3');
+----
+Catalog Error: Sequence with name sequence3 does not exist!
 
 statement error
 SELECT nextval('sequence4');
+----
+Catalog Error: Sequence with name sequence4 does not exist!

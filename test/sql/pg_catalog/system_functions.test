@@ -2,6 +2,7 @@
 # description: Test various postgres' system functions (https://www.postgresql.org/docs/9.1/functions-info.html)
 # group: [pg_catalog]
 
+# avoid loading a storage database because it changes the initial database name
 query I
 SELECT CURRENT_USER
 ----
@@ -10,12 +11,17 @@ duckdb
 query I
 SELECT CURRENT_CATALOG
 ----
-duckdb
+memory
 
 query I
 SELECT CURRENT_DATABASE()
 ----
-duckdb
+memory
+
+query I
+SELECT pg_catalog.CURRENT_DATABASE()
+----
+memory
 
 query I
 SELECT USER
@@ -35,6 +41,11 @@ SELECT current_query();
 ----
 SELECT current_query();
 
+query I
+SELECT pg_catalog.current_query();
+----
+SELECT pg_catalog.current_query();
+
 query IIII
 SELECT 1, 2, 3, current_query();
 ----
@@ -48,7 +59,7 @@ main
 query I
 SELECT current_schemas(true);
 ----
-[temp, main, pg_catalog]
+[main, main, main, pg_catalog]
 
 query I
 SELECT current_schemas(false);
@@ -80,3 +91,8 @@ query I
 select pg_typeof(1);
 ----
 integer
+
+statement error
+SELECT temp.current_user()
+----
+main.current_user

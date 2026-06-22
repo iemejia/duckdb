@@ -8,29 +8,30 @@
 
 #pragma once
 
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 #include "duckdb/parser/query_node.hpp"
-#include "duckdb/parser/sql_statement.hpp"
 
 namespace duckdb {
 
 class RecursiveCTENode : public QueryNode {
 public:
+	static constexpr const QueryNodeType TYPE = QueryNodeType::RECURSIVE_CTE_NODE;
+
+public:
 	RecursiveCTENode() : QueryNode(QueryNodeType::RECURSIVE_CTE_NODE) {
 	}
 
-	string ctename;
+	Identifier ctename;
 	bool union_all;
 	//! The left side of the set operation
 	unique_ptr<QueryNode> left;
 	//! The right side of the set operation
 	unique_ptr<QueryNode> right;
 	//! Aliases of the recursive CTE node
-	vector<string> aliases;
-
-	const vector<unique_ptr<ParsedExpression>> &GetSelectList() const override {
-		return left->GetSelectList();
-	}
+	vector<Identifier> aliases;
+	//! targets for key variants
+	vector<unique_ptr<ParsedExpression>> key_targets;
 
 public:
 	//! Convert the query node to a string
@@ -41,9 +42,10 @@ public:
 	unique_ptr<QueryNode> Copy() const override;
 
 	//! Serializes a QueryNode to a stand-alone binary blob
-	void Serialize(FieldWriter &writer) const override;
 	//! Deserializes a blob back into a QueryNode
-	static unique_ptr<QueryNode> Deserialize(FieldReader &reader);
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<QueryNode> Deserialize(Deserializer &source);
 };
 
 } // namespace duckdb

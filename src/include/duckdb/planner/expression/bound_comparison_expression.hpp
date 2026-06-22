@@ -8,27 +8,33 @@
 
 #pragma once
 
-#include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
+//! The BoundComparisonExpression has been moved to a function expression
+//! This class exists only as a set of helper methods
+struct BoundComparisonExpression {
+	static bool IsComparison(ExpressionType type);
+	static bool IsComparison(const Expression &expr);
 
-class BoundComparisonExpression : public Expression {
-public:
-	BoundComparisonExpression(ExpressionType type, unique_ptr<Expression> left, unique_ptr<Expression> right);
+	static const Expression &Left(const BoundFunctionExpression &comparison_expr);
+	static const Expression &Right(const BoundFunctionExpression &comparison_expr);
 
-	unique_ptr<Expression> left;
-	unique_ptr<Expression> right;
+	static unique_ptr<Expression> &LeftMutable(BoundFunctionExpression &between_expr);
+	static unique_ptr<Expression> &RightMutable(BoundFunctionExpression &between_expr);
+	static unique_ptr<Expression> Create(ExpressionType type, unique_ptr<Expression> left,
+	                                     unique_ptr<Expression> right);
 
-public:
-	string ToString() const override;
+	//! Flip the comparison type, updating both the expression type and the bind data.
+	//! Use instead of SetExpressionTypeUnsafe to keep the two in sync.
+	static void FlipType(BoundFunctionExpression &comparison_expr);
+	//! Set the comparison type, updating both the expression type and the bind data.
+	//! Use instead of SetExpressionTypeUnsafe to keep the two in sync.
+	static void SetType(BoundFunctionExpression &comparison_expr, ExpressionType new_type);
 
-	bool Equals(const BaseExpression *other) const override;
-
-	unique_ptr<Expression> Copy() override;
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<Expression> Deserialize(ExpressionDeserializationState &state, FieldReader &reader);
-
-public:
-	static LogicalType BindComparison(LogicalType left_type, LogicalType right_type);
+	static LogicalType BindComparison(ClientContext &context, const LogicalType &left_type,
+	                                  const LogicalType &right_type, ExpressionType comparison_type);
+	static bool TryBindComparison(ClientContext &context, const LogicalType &left_type, const LogicalType &right_type,
+	                              LogicalType &result_type, ExpressionType comparison_type);
 };
 } // namespace duckdb

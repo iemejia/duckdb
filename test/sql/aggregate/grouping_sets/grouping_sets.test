@@ -3,7 +3,7 @@
 # group: [grouping_sets]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 create table students (course VARCHAR, type VARCHAR);
@@ -271,3 +271,5 @@ select count(*), course, type
 # course is not a group or aggregate column
 statement error
 select course from students group by ();
+----
+Binder Error: column "course" must appear in the GROUP BY

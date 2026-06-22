@@ -9,74 +9,88 @@
 #include "tpcds_constants.hpp"
 #include "dsdgen_schema.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
+#include "dsdgen-c/porting.h"
+#include "dsdgen-c/parallel.h"
 
 #include <cassert>
 
 using namespace duckdb;
-using namespace std;
 
 namespace tpcds {
 
 template <class T>
-static void CreateTPCDSTable(ClientContext &context, string schema, string suffix, bool keys, bool overwrite) {
-	auto info = make_unique<CreateTableInfo>();
+static void CreateTPCDSTable(ClientContext &context, const Identifier &catalog_name, const Identifier &schema,
+                             string suffix, bool keys, bool overwrite) {
+	auto info = make_uniq<CreateTableInfo>();
+	info->catalog = catalog_name;
 	info->schema = schema;
-	info->table = T::Name + suffix;
+	info->table = Identifier(T::Name + suffix);
 	info->on_conflict = overwrite ? OnCreateConflict::REPLACE_ON_CONFLICT : OnCreateConflict::ERROR_ON_CONFLICT;
 	info->temporary = false;
 	for (idx_t i = 0; i < T::ColumnCount; i++) {
 		info->columns.AddColumn(ColumnDefinition(T::Columns[i], T::Types[i]));
 	}
 	if (keys) {
-		vector<string> pk_columns;
+		duckdb::vector<duckdb::Identifier> pk_columns;
 		for (idx_t i = 0; i < T::PrimaryKeyCount; i++) {
-			pk_columns.push_back(T::PrimaryKeyColumns[i]);
+			pk_columns.emplace_back(T::PrimaryKeyColumns[i]);
 		}
-		info->constraints.push_back(make_unique<UniqueConstraint>(move(pk_columns), true));
+		info->constraints.push_back(make_uniq<UniqueConstraint>(std::move(pk_columns), true));
 	}
-	auto &catalog = Catalog::GetCatalog(context);
-	catalog.CreateTable(context, move(info));
+	auto &catalog = Catalog::GetCatalog(context, catalog_name);
+	catalog.CreateTable(context, std::move(info));
 }
 
-void DSDGenWrapper::CreateTPCDSSchema(ClientContext &context, string schema, string suffix, bool keys, bool overwrite) {
-	CreateTPCDSTable<CallCenterInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<CatalogPageInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<CatalogReturnsInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<CatalogSalesInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<CustomerInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<CustomerAddressInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<CustomerDemographicsInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<DateDimInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<HouseholdDemographicsInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<IncomeBandInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<InventoryInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<ItemInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<PromotionInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<ReasonInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<ShipModeInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<StoreInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<StoreReturnsInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<StoreSalesInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<TimeDimInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<WarehouseInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<WebPageInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<WebReturnsInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<WebSalesInfo>(context, schema, suffix, keys, overwrite);
-	CreateTPCDSTable<WebSiteInfo>(context, schema, suffix, keys, overwrite);
+void DSDGenWrapper::CreateTPCDSSchema(ClientContext &context, const Identifier &catalog, const Identifier &schema,
+                                      string suffix, bool keys, bool overwrite) {
+	CreateTPCDSTable<CallCenterInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<CatalogPageInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<CatalogReturnsInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<CatalogSalesInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<CustomerInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<CustomerAddressInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<CustomerDemographicsInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<DateDimInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<HouseholdDemographicsInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<IncomeBandInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<InventoryInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<ItemInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<PromotionInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<ReasonInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<ShipModeInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<StoreInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<StoreReturnsInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<StoreSalesInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<TimeDimInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<WarehouseInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<WebPageInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<WebReturnsInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<WebSalesInfo>(context, catalog, schema, suffix, keys, overwrite);
+	CreateTPCDSTable<WebSiteInfo>(context, catalog, schema, suffix, keys, overwrite);
 }
 
-void DSDGenWrapper::DSDGen(double scale, ClientContext &context, string schema, string suffix) {
+void DSDGenWrapper::DSDGen(double scale, ClientContext &context, const Identifier &catalog_name,
+                           const Identifier &schema, string suffix) {
 	if (scale <= 0) {
 		// schema only
 		return;
 	}
 
+#ifdef DEBUG
+	// With a scale of 778+ the following multiplication (signed int target value) during generation is:
+	// r->cc_sq_ft *= r->cc_employees overflows;
+	// 3,464,105 * 649 = 2,248,204,145 (max. signed int value: 2,147,483,647)
+	if (scale > 777) {
+		throw InvalidInputException("DSDGen results in a signed integer overflow with a scale exceeding 777.");
+	}
+#endif
+
 	InitializeDSDgen(scale);
 
 	// populate append info
-	vector<unique_ptr<tpcds_append_information>> append_info;
+	duckdb::vector<duckdb::unique_ptr<tpcds_append_information>> append_info;
 	append_info.resize(DBGEN_VERSION);
-	auto &catalog = Catalog::GetCatalog(context);
+	auto &catalog = Catalog::GetCatalog(context, catalog_name);
 
 	int tmin = CALL_CENTER, tmax = DBGEN_VERSION;
 
@@ -84,11 +98,15 @@ void DSDGenWrapper::DSDGen(double scale, ClientContext &context, string schema, 
 		auto table_def = GetTDefByNumber(table_id);
 		auto table_name = table_def.name + suffix;
 		assert(table_def.name);
-		auto table_entry = catalog.GetEntry<TableCatalogEntry>(context, schema, table_name);
+		auto &table_entry = catalog.GetEntry<TableCatalogEntry>(context, schema, Identifier(table_name));
 
-		auto append = make_unique<tpcds_append_information>(context, table_entry);
+		if (!table_entry.IsDuckTable()) {
+			throw InvalidInputException("dsdgen is only supported for DuckDB database files");
+		}
+
+		auto append = make_uniq<tpcds_append_information>(context, &table_entry);
 		append->table_def = table_def;
-		append_info[table_id] = move(append);
+		append_info[table_id] = std::move(append);
 	}
 
 	// actually generate tables using modified data generator functions
@@ -112,11 +130,15 @@ void DSDGenWrapper::DSDGen(double scale, ClientContext &context, string schema, 
 		assert(builder_func);
 
 		for (ds_key_t i = k_first_row; k_row_count; i++, k_row_count--) {
+			if (k_row_count % 1000 == 0 && context.IsInterrupted()) {
+				throw InterruptException();
+			}
 			// append happens directly in builders since they dump child tables
 			// immediately
 			if (builder_func((void *)&append_info, i)) {
-				throw Exception("Table generation failed");
+				throw InternalException("Table generation failed");
 			}
+			row_stop(table_id);
 		}
 	}
 

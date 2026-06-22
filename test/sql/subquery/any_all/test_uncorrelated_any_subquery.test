@@ -3,7 +3,7 @@
 # group: [any_all]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE integers(i INTEGER)
@@ -58,7 +58,7 @@ NULL	NULL
 3	NULL
 
 query I
-SELECT i FROM integers WHERE i = ANY(SELECT i FROM integers)
+SELECT i FROM integers WHERE i = ANY(SELECT i FROM integers) order by i
 ----
 1
 2

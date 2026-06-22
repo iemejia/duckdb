@@ -3,10 +3,10 @@
 # group: [statistics]
 
 statement ok
-CREATE TABLE integers AS SELECT * FROM (VALUES (1), (2), (3)) tbl(i);
+SET default_null_order='nulls_first';
 
 statement ok
-PRAGMA enable_verification;
+CREATE TABLE integers AS SELECT * FROM (VALUES (1), (2), (3)) tbl(i);
 
 statement ok
 PRAGMA explain_output = OPTIMIZED_ONLY;

@@ -15,12 +15,15 @@ namespace duckdb {
 
 class ForeignKeyConstraint : public Constraint {
 public:
-	DUCKDB_API ForeignKeyConstraint(vector<string> pk_columns, vector<string> fk_columns, ForeignKeyInfo info);
+	static constexpr const ConstraintType TYPE = ConstraintType::FOREIGN_KEY;
+
+public:
+	DUCKDB_API ForeignKeyConstraint(vector<Identifier> pk_columns, vector<Identifier> fk_columns, ForeignKeyInfo info);
 
 	//! The set of main key table's columns
-	vector<string> pk_columns;
+	vector<Identifier> pk_columns;
 	//! The set of foreign key table's columns
-	vector<string> fk_columns;
+	vector<Identifier> fk_columns;
 	ForeignKeyInfo info;
 
 public:
@@ -28,10 +31,11 @@ public:
 
 	DUCKDB_API unique_ptr<Constraint> Copy() const override;
 
-	//! Serialize to a stand-alone binary blob
-	DUCKDB_API void Serialize(FieldWriter &writer) const override;
-	//! Deserializes a ParsedConstraint
-	DUCKDB_API static unique_ptr<Constraint> Deserialize(FieldReader &source);
+	DUCKDB_API void Serialize(Serializer &serializer) const override;
+	DUCKDB_API static unique_ptr<Constraint> Deserialize(Deserializer &deserializer);
+
+private:
+	ForeignKeyConstraint();
 };
 
 } // namespace duckdb

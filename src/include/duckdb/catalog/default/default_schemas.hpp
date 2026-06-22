@@ -17,8 +17,9 @@ public:
 	explicit DefaultSchemaGenerator(Catalog &catalog);
 
 public:
-	unique_ptr<CatalogEntry> CreateDefaultEntry(ClientContext &context, const string &entry_name) override;
-	vector<string> GetDefaultEntries() override;
+	unique_ptr<CatalogEntry> CreateDefaultEntry(CatalogTransaction transaction, const Identifier &entry_name) override;
+	vector<Identifier> GetDefaultEntries() override;
+	static bool IsDefaultSchema(const Identifier &input_schema);
 };
 
 } // namespace duckdb

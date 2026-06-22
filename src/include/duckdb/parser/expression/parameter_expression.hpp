@@ -11,13 +11,36 @@
 #include "duckdb/parser/parsed_expression.hpp"
 
 namespace duckdb {
+
+// Parameters come in three different types:
+// auto-increment:
+//	token: '?'
+//	name: -
+//	number: 0
+// positional:
+//	token: '$<number>'
+//	name: -
+//	number: <number>
+// named:
+//	token: '$<name>'
+//	name: <name>
+//	number: 0
+enum class PreparedParamType : uint8_t { AUTO_INCREMENT, POSITIONAL, NAMED, INVALID };
+
 class ParameterExpression : public ParsedExpression {
+public:
+	static constexpr const ExpressionClass TYPE = ExpressionClass::PARAMETER;
+
 public:
 	ParameterExpression();
 
-	idx_t parameter_nr;
-
 public:
+	const duckdb::Identifier &Identifier() const {
+		return identifier;
+	}
+	duckdb::Identifier &IdentifierMutable() {
+		return identifier;
+	}
 	bool IsScalar() const override {
 		return true;
 	}
@@ -27,12 +50,15 @@ public:
 
 	string ToString() const override;
 
-	static bool Equals(const ParameterExpression *a, const ParameterExpression *b);
+	bool Equals(const ParsedExpression &other) const override;
 
 	unique_ptr<ParsedExpression> Copy() const override;
 	hash_t Hash() const override;
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<ParsedExpression> Deserialize(ExpressionType type, FieldReader &source);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ParsedExpression> Deserialize(Deserializer &deserializer);
+
+private:
+	duckdb::Identifier identifier;
 };
 } // namespace duckdb

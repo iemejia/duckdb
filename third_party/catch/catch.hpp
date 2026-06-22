@@ -12,6 +12,22 @@
 #define TWOBLUECUBES_SINGLE_INCLUDE_CATCH_HPP_INCLUDED
 // start catch.hpp
 
+#include <memory>
+#include <sstream>
+
+#ifndef DUCKDB_BASE_STD
+namespace duckdb_base_std {
+	using ::std::unique_ptr;
+	using ::std::shared_ptr;
+	using ::std::make_shared;
+	using ::std::stringstream;
+} // namespace duckdb_base_std
+#endif
+// optional support for printing stacktraces on a crash -- using the backtrace support in DuckDB
+#ifdef DUCKDB_DEBUG_STACKTRACE
+#include "duckdb/common/exception.hpp"
+#define CATCH_STACKTRACE(X) duckdb::Exception::FormatStackTrace(X).c_str()
+#endif
 
 #define CATCH_VERSION_MAJOR 2
 #define CATCH_VERSION_MINOR 13
@@ -69,14 +85,7 @@
 // See e.g.:
 // https://opensource.apple.com/source/CarbonHeaders/CarbonHeaders-18.1/TargetConditionals.h.auto.html
 #ifdef __APPLE__
-#  include <TargetConditionals.h>
-#  if (defined(TARGET_OS_OSX) && TARGET_OS_OSX == 1) || \
-      (defined(TARGET_OS_MAC) && TARGET_OS_MAC == 1)
-#    define CATCH_PLATFORM_MAC
-#  elif (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE == 1)
-#    define CATCH_PLATFORM_IPHONE
-#  endif
-
+#  define CATCH_PLATFORM_MAC
 #elif defined(linux) || defined(__linux) || defined(__linux__)
 #  define CATCH_PLATFORM_LINUX
 
@@ -96,6 +105,11 @@
 // start catch_user_interfaces.h
 
 namespace Catch {
+
+static bool CharacterIsSpace(char c) {
+       return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
     unsigned int rngSeed();
 }
 
@@ -591,6 +605,8 @@ namespace Catch {
 // end catch_interfaces_testcase.h
 // start catch_stringref.h
 
+#include <cctype>
+#include <locale>
 #include <cstddef>
 #include <string>
 #include <iosfwd>
@@ -2476,6 +2492,12 @@ namespace Catch {
 
         virtual void emplaceUnscopedMessage( MessageBuilder const& builder ) = 0;
 
+        virtual void onTestBegin() {}
+        virtual void skipTestDuringRun( std::string message ) {}
+        virtual bool skippedTest() {
+            return false;
+        }
+
         virtual void handleFatalErrorCondition( StringRef message ) = 0;
 
         virtual void handleExpr
@@ -2801,6 +2823,10 @@ namespace Catch {
     Catch::getResultCapture().emplaceUnscopedMessage( Catch::MessageBuilder( macroName##_catch_sr, CATCH_INTERNAL_LINEINFO, Catch::ResultWas::Info ) << log )
 
 ///////////////////////////////////////////////////////////////////////////////
+#define INTERNAL_CATCH_SKIP_TEST( reason ) \
+    Catch::getResultCapture().skipTestDuringRun( reason )
+
+///////////////////////////////////////////////////////////////////////////////
 // Although this is matcher-based, it can be used with just a string
 #define INTERNAL_CATCH_THROWS_STR_MATCHES( macroName, resultDisposition, matcher, ... ) \
     do { \
@@ -2828,6 +2854,7 @@ namespace Catch {
 // start catch_totals.h
 
 #include <cstddef>
+#include <map>
 
 namespace Catch {
 
@@ -2852,8 +2879,10 @@ namespace Catch {
         Totals delta( Totals const& prevTotals ) const;
 
         int error = 0;
+        std::size_t skippedTests = 0;
         Counts assertions;
         Counts testCases;
+        std::map<std::string, std::size_t> skippedTestReasons;
     };
 }
 
@@ -2986,6 +3015,7 @@ namespace Catch {
         virtual void registerTranslator( const IExceptionTranslator* translator ) = 0;
         virtual void registerTagAlias( std::string const& alias, std::string const& tag, SourceLineInfo const& lineInfo ) = 0;
         virtual void registerStartupException() noexcept = 0;
+        virtual void clearTests() = 0;
         virtual IMutableEnumValuesRegistry& getMutableEnumValuesRegistry() = 0;
     };
 
@@ -3010,7 +3040,7 @@ namespace Catch {
     using exceptionTranslateFunction = std::string(*)();
 
     struct IExceptionTranslator;
-    using ExceptionTranslators = std::vector<std::unique_ptr<IExceptionTranslator const>>;
+    using ExceptionTranslators = std::vector<duckdb_base_std::unique_ptr<IExceptionTranslator const>>;
 
     struct IExceptionTranslator {
         virtual ~IExceptionTranslator();
@@ -3857,7 +3887,7 @@ namespace Catch {
              // can be retrieved).
             virtual bool next() = 0;
         };
-        using GeneratorBasePtr = std::unique_ptr<GeneratorUntypedBase>;
+        using GeneratorBasePtr = duckdb_base_std::unique_ptr<GeneratorUntypedBase>;
 
     } // namespace Generators
 
@@ -3937,8 +3967,8 @@ namespace Generators {
     // !TBD move this into its own location?
     namespace pf{
         template<typename T, typename... Args>
-        std::unique_ptr<T> make_unique( Args&&... args ) {
-            return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+        duckdb_base_std::unique_ptr<T> make_unique( Args&&... args ) {
+            return duckdb_base_std::unique_ptr<T>(new T(std::forward<Args>(args)...));
         }
     }
 
@@ -3989,9 +4019,9 @@ namespace Generators {
 
     template <typename T>
     class GeneratorWrapper final {
-        std::unique_ptr<IGenerator<T>> m_generator;
+        duckdb_base_std::unique_ptr<IGenerator<T>> m_generator;
     public:
-        GeneratorWrapper(std::unique_ptr<IGenerator<T>> generator):
+        GeneratorWrapper(duckdb_base_std::unique_ptr<IGenerator<T>> generator):
             m_generator(std::move(generator))
         {}
         T const& get() const {
@@ -4193,7 +4223,7 @@ namespace Generators {
 
     template <typename T, typename Predicate>
     GeneratorWrapper<T> filter(Predicate&& pred, GeneratorWrapper<T>&& generator) {
-        return GeneratorWrapper<T>(std::unique_ptr<IGenerator<T>>(pf::make_unique<FilterGenerator<T, Predicate>>(std::forward<Predicate>(pred), std::move(generator))));
+        return GeneratorWrapper<T>(duckdb_base_std::unique_ptr<IGenerator<T>>(pf::make_unique<FilterGenerator<T, Predicate>>(std::forward<Predicate>(pred), std::move(generator))));
     }
 
     template <typename T>
@@ -4526,6 +4556,7 @@ namespace Catch {
         virtual double minDuration() const = 0;
         virtual TestSpec const& testSpec() const = 0;
         virtual bool hasTestFilters() const = 0;
+        virtual std::string getTestListFile() const = 0;
         virtual std::vector<std::string> const& getTestsOrTags() const = 0;
         virtual RunTests::InWhatOrder runOrder() const = 0;
         virtual unsigned int rngSeed() const = 0;
@@ -4534,6 +4565,7 @@ namespace Catch {
         virtual int endOffset() const = 0;
         virtual int endOffsetPercentage() const = 0;
         virtual bool outputSQL() const = 0;
+        virtual bool printFailingTests() const = 0;
         virtual UseColour::YesOrNo useColour() const = 0;
         virtual std::vector<std::string> const& getSectionsToRun() const = 0;
         virtual Verbosity verbosity() const = 0;
@@ -5298,6 +5330,7 @@ namespace Catch {
         int endOffsetPercentage = -1;
 
 	    bool outputSQL = false;
+	    bool printFailingTests = false;
 
         bool benchmarkNoAnalysis = false;
         unsigned int benchmarkSamples = 100;
@@ -5324,6 +5357,7 @@ namespace Catch {
 
         std::vector<std::string> testsOrTags;
         std::vector<std::string> sectionsToRun;
+        std::string testListFile;
     };
 
     class Config : public IConfig {
@@ -5343,6 +5377,7 @@ namespace Catch {
         std::string getProcessName() const;
         std::string const& getReporterName() const;
 
+        std::string getTestListFile() const override;
         std::vector<std::string> const& getTestsOrTags() const override;
         std::vector<std::string> const& getSectionsToRun() const override;
 
@@ -5367,6 +5402,7 @@ namespace Catch {
         int endOffset() const override;
         int endOffsetPercentage() const override;
         bool outputSQL() const override;
+        bool printFailingTests() const override;
         UseColour::YesOrNo useColour() const override;
         bool shouldDebugBreak() const override;
         int abortAfter() const override;
@@ -5383,7 +5419,7 @@ namespace Catch {
         IStream const* openStream();
         ConfigData m_data;
 
-        std::unique_ptr<IStream const> m_stream;
+        duckdb_base_std::unique_ptr<IStream const> m_stream;
         TestSpec m_testSpec;
         bool m_hasTestFilters = false;
     };
@@ -5488,7 +5524,6 @@ namespace Catch {
 
 #include <string>
 #include <iosfwd>
-#include <map>
 #include <set>
 #include <memory>
 #include <algorithm>
@@ -5708,7 +5743,7 @@ namespace Catch {
 
         virtual bool isMulti() const;
     };
-    using IStreamingReporterPtr = std::unique_ptr<IStreamingReporter>;
+    using IStreamingReporterPtr = duckdb_base_std::unique_ptr<IStreamingReporter>;
 
     struct IReporterFactory {
         virtual ~IReporterFactory();
@@ -5897,7 +5932,7 @@ namespace Catch {
             std::shared_ptr<SectionNode> node;
             if( m_sectionStack.empty() ) {
                 if( !m_rootSection )
-                    m_rootSection = std::make_shared<SectionNode>( incompleteStats );
+                    m_rootSection = duckdb_base_std::make_shared<SectionNode>( incompleteStats );
                 node = m_rootSection;
             }
             else {
@@ -5907,7 +5942,7 @@ namespace Catch {
                                     parentNode.childSections.end(),
                                     BySectionInfo( sectionInfo ) );
                 if( it == parentNode.childSections.end() ) {
-                    node = std::make_shared<SectionNode>( incompleteStats );
+                    node = duckdb_base_std::make_shared<SectionNode>( incompleteStats );
                     parentNode.childSections.push_back( node );
                 }
                 else
@@ -5938,7 +5973,7 @@ namespace Catch {
             m_sectionStack.pop_back();
         }
         void testCaseEnded(TestCaseStats const& testCaseStats) override {
-            auto node = std::make_shared<TestCaseNode>(testCaseStats);
+            auto node = duckdb_base_std::make_shared<TestCaseNode>(testCaseStats);
             assert(m_sectionStack.size() == 0);
             node->children.push_back(m_rootSection);
             m_testCases.push_back(node);
@@ -5949,12 +5984,12 @@ namespace Catch {
             m_deepestSection->stdErr = testCaseStats.stdErr;
         }
         void testGroupEnded(TestGroupStats const& testGroupStats) override {
-            auto node = std::make_shared<TestGroupNode>(testGroupStats);
+            auto node = duckdb_base_std::make_shared<TestGroupNode>(testGroupStats);
             node->children.swap(m_testCases);
             m_testGroups.push_back(node);
         }
         void testRunEnded(TestRunStats const& testRunStats) override {
-            auto node = std::make_shared<TestRunNode>(testRunStats);
+            auto node = duckdb_base_std::make_shared<TestRunNode>(testRunStats);
             node->children.swap(m_testGroups);
             m_testRuns.push_back(node);
             testRunEndedCumulative();
@@ -6070,7 +6105,7 @@ namespace Catch {
         class ReporterFactory : public IReporterFactory {
 
             IStreamingReporterPtr create( ReporterConfig const& config ) const override {
-                return std::unique_ptr<T>( new T( config ) );
+                return duckdb_base_std::unique_ptr<T>( new T( config ) );
             }
 
             std::string getDescription() const override {
@@ -6081,7 +6116,7 @@ namespace Catch {
     public:
 
         explicit ReporterRegistrar( std::string const& name ) {
-            getMutableRegistryHub().registerReporter( name, std::make_shared<ReporterFactory>() );
+            getMutableRegistryHub().registerReporter( name, duckdb_base_std::make_shared<ReporterFactory>() );
         }
     };
 
@@ -6091,7 +6126,7 @@ namespace Catch {
         class ListenerFactory : public IReporterFactory {
 
             IStreamingReporterPtr create( ReporterConfig const& config ) const override {
-                return std::unique_ptr<T>( new T( config ) );
+                return duckdb_base_std::unique_ptr<T>( new T( config ) );
             }
             std::string getDescription() const override {
                 return std::string();
@@ -6101,7 +6136,7 @@ namespace Catch {
     public:
 
         ListenerRegistrar() {
-            getMutableRegistryHub().registerListener( std::make_shared<ListenerFactory>() );
+            getMutableRegistryHub().registerListener( duckdb_base_std::make_shared<ListenerFactory>() );
         }
     };
 }
@@ -6170,7 +6205,7 @@ namespace Catch {
     class TablePrinter;
 
     struct ConsoleReporter : StreamingReporterBase<ConsoleReporter> {
-        std::unique_ptr<TablePrinter> m_tablePrinter;
+        duckdb_base_std::unique_ptr<TablePrinter> m_tablePrinter;
 
         ConsoleReporter(ReporterConfig const& config);
         ~ConsoleReporter() override;
@@ -6223,6 +6258,7 @@ namespace Catch {
 
     private:
         bool m_headerPrinted = false;
+        std::vector<std::string> m_failedTestNames;
     };
 
 } // end namespace Catch
@@ -6782,7 +6818,7 @@ namespace Catch {
                 void operator()(Chronometer meter) const { f->call(meter); }
 
             private:
-                std::unique_ptr<callable> f;
+                duckdb_base_std::unique_ptr<callable> f;
             };
         } // namespace Detail
     } // namespace Benchmark
@@ -8138,6 +8174,10 @@ namespace Catch {
 
         void emplaceUnscopedMessage( MessageBuilder const& builder ) override;
 
+        void onTestBegin() override;
+        void skipTestDuringRun( std::string message ) override;
+        bool skippedTest() override;
+
         std::string getCurrentTestName() const override;
 
         const AssertionResult* getLastResult() const override;
@@ -8194,6 +8234,7 @@ namespace Catch {
         bool m_lastAssertionPassed = false;
         bool m_shouldReportUnexpected = true;
         bool m_includeSuccessfulResults;
+        std::string m_skippedTestReason;
     };
 
     void seedRng(IConfig const& config);
@@ -9087,7 +9128,8 @@ namespace detail {
 
     template<typename T>
     inline auto convertInto( std::string const &source, T& target ) -> ParserResult {
-        std::stringstream ss;
+        duckdb_base_std::stringstream ss;
+	ss.imbue(std::locale::classic());
         ss << source;
         ss >> target;
         if( ss.fail() )
@@ -9275,13 +9317,13 @@ namespace detail {
     public:
         template<typename T>
         ParserRefImpl( T &ref, std::string const &hint )
-        :   m_ref( std::make_shared<BoundValueRef<T>>( ref ) ),
+        :   m_ref( duckdb_base_std::make_shared<BoundValueRef<T>>( ref ) ),
             m_hint( hint )
         {}
 
         template<typename LambdaT>
         ParserRefImpl( LambdaT const &ref, std::string const &hint )
-        :   m_ref( std::make_shared<BoundLambda<LambdaT>>( ref ) ),
+        :   m_ref( duckdb_base_std::make_shared<BoundLambda<LambdaT>>( ref ) ),
             m_hint(hint)
         {}
 
@@ -9320,19 +9362,19 @@ namespace detail {
 
         template<typename LambdaT>
         static auto makeRef(LambdaT const &lambda) -> std::shared_ptr<BoundValueRefBase> {
-            return std::make_shared<BoundLambda<LambdaT>>( lambda) ;
+            return duckdb_base_std::make_shared<BoundLambda<LambdaT>>( lambda) ;
         }
 
     public:
-        ExeName() : m_name( std::make_shared<std::string>( "<executable>" ) ) {}
+        ExeName() : m_name( duckdb_base_std::make_shared<std::string>( "<executable>" ) ) {}
 
         explicit ExeName( std::string &ref ) : ExeName() {
-            m_ref = std::make_shared<BoundValueRef<std::string>>( ref );
+            m_ref = duckdb_base_std::make_shared<BoundValueRef<std::string>>( ref );
         }
 
         template<typename LambdaT>
         explicit ExeName( LambdaT const& lambda ) : ExeName() {
-            m_ref = std::make_shared<BoundLambda<LambdaT>>( lambda );
+            m_ref = duckdb_base_std::make_shared<BoundLambda<LambdaT>>( lambda );
         }
 
         // The exe name is not parsed out of the normal tokens, but is handled specially
@@ -9393,12 +9435,13 @@ namespace detail {
     class Opt : public ParserRefImpl<Opt> {
     protected:
         std::vector<std::string> m_optNames;
+        bool m_acceptsMany = false;
 
     public:
         template<typename LambdaT>
-        explicit Opt( LambdaT const &ref ) : ParserRefImpl( std::make_shared<BoundFlagLambda<LambdaT>>( ref ) ) {}
+        explicit Opt( LambdaT const &ref ) : ParserRefImpl( duckdb_base_std::make_shared<BoundFlagLambda<LambdaT>>( ref ) ) {}
 
-        explicit Opt( bool &ref ) : ParserRefImpl( std::make_shared<BoundFlagRef>( ref ) ) {}
+        explicit Opt( bool &ref ) : ParserRefImpl( duckdb_base_std::make_shared<BoundFlagRef>( ref ) ) {}
 
         template<typename LambdaT>
         Opt( LambdaT const &ref, std::string const &hint ) : ParserRefImpl( ref, hint ) {}
@@ -9409,6 +9452,18 @@ namespace detail {
         auto operator[]( std::string const &optName ) -> Opt & {
             m_optNames.push_back( optName );
             return *this;
+        }
+
+        auto acceptingMultiple() -> Opt & {
+            m_acceptsMany = true;
+            return *this;
+        }
+
+        auto cardinality() const -> size_t override {
+            if (m_acceptsMany) {
+                return 0;
+            }
+            return ParserRefImpl::cardinality();
         }
 
         auto getHelpColumns() const -> std::vector<HelpColumns> {
@@ -9747,16 +9802,15 @@ namespace Catch {
                 while( std::getline( f, line ) ) {
                     line = trim(line);
                     if( !line.empty() && !startsWith( line, '#' ) ) {
+                        if( !config.testsOrTags.empty() ) {
+                            config.testsOrTags.emplace_back( "," );
+                        }
                         if( !startsWith( line, '"' ) )
                             line = '"' + line + '"';
                         config.testsOrTags.push_back( line );
-                        config.testsOrTags.emplace_back( "," );
                     }
                 }
-                //Remove comma in the end
-                if(!config.testsOrTags.empty())
-                    config.testsOrTags.erase( config.testsOrTags.end()-1 );
-
+                config.testListFile = filename;
                 return ParserResult::ok( ParseResultType::Matched );
             };
         auto const setTestOrder = [&]( std::string const& order ) {
@@ -9875,6 +9929,7 @@ namespace Catch {
                 ( "show test durations for tests taking at least the given number of seconds" )
             | Opt( loadTestNamesFromFile, "filename" )
                 ["-f"]["--input-file"]
+                .acceptingMultiple()
                 ( "load test names to run from a file" )
             | Opt( config.filenamesAsTags )
                 ["-#"]["--filenames-as-tags"]
@@ -9915,6 +9970,9 @@ namespace Catch {
             | Opt( config.outputSQL, "true|false" )
                 ["--output-sql"]
                 ( "if set, only output SQL statements to stderr rather than running the tests" )
+            | Opt( config.printFailingTests )
+                ["--print-failing-tests"]
+                ( "if set, print the names of all failing tests at the end of the run" )
             | Opt( config.libIdentify )
                 ["--libidentify"]
                 ( "report name and version according to libidentify standard" )
@@ -10019,6 +10077,7 @@ namespace Catch {
     std::string Config::getProcessName() const { return m_data.processName; }
     std::string const& Config::getReporterName() const { return m_data.reporterName; }
 
+    std::string Config::getTestListFile() const { return m_data.testListFile; }
     std::vector<std::string> const& Config::getTestsOrTags() const { return m_data.testsOrTags; }
     std::vector<std::string> const& Config::getSectionsToRun() const { return m_data.sectionsToRun; }
 
@@ -10043,6 +10102,7 @@ namespace Catch {
     int Config::startOffsetPercentage() const          { return m_data.startOffsetPercentage; }
     int Config::endOffsetPercentage() const            { return m_data.endOffsetPercentage; }
     bool Config::outputSQL() const                     { return m_data.outputSQL; }
+    bool Config::printFailingTests() const             { return m_data.printFailingTests; }
     UseColour::YesOrNo Config::useColour() const       { return m_data.useColour; }
     bool Config::shouldDebugBreak() const              { return m_data.shouldDebugBreak; }
     int Config::abortAfter() const                     { return m_data.abortAfter; }
@@ -10599,11 +10659,11 @@ namespace Catch {
 
     namespace Detail {
 
-        std::unique_ptr<EnumInfo> makeEnumInfo( StringRef enumName, StringRef allValueNames, std::vector<int> const& values );
+        duckdb_base_std::unique_ptr<EnumInfo> makeEnumInfo( StringRef enumName, StringRef allValueNames, std::vector<int> const& values );
 
         class EnumValuesRegistry : public IMutableEnumValuesRegistry {
 
-            std::vector<std::unique_ptr<EnumInfo>> m_enumInfos;
+            std::vector<duckdb_base_std::unique_ptr<EnumInfo>> m_enumInfos;
 
             EnumInfo const& registerEnum( StringRef enumName, StringRef allEnums, std::vector<int> const& values) override;
         };
@@ -10658,8 +10718,8 @@ namespace Catch {
             return "{** unexpected enum value **}"_sr;
         }
 
-        std::unique_ptr<EnumInfo> makeEnumInfo( StringRef enumName, StringRef allValueNames, std::vector<int> const& values ) {
-            std::unique_ptr<EnumInfo> enumInfo( new EnumInfo );
+        duckdb_base_std::unique_ptr<EnumInfo> makeEnumInfo( StringRef enumName, StringRef allValueNames, std::vector<int> const& values ) {
+            duckdb_base_std::unique_ptr<EnumInfo> enumInfo( new EnumInfo );
             enumInfo->m_name = enumName;
             enumInfo->m_values.reserve( values.size() );
 
@@ -10708,7 +10768,7 @@ namespace Catch {
         std::string tryTranslators() const;
 
     private:
-        std::vector<std::unique_ptr<IExceptionTranslator const>> m_translators;
+        std::vector<duckdb_base_std::unique_ptr<IExceptionTranslator const>> m_translators;
     };
 }
 
@@ -10723,7 +10783,7 @@ namespace Catch {
     }
 
     void ExceptionTranslatorRegistry::registerTranslator( const IExceptionTranslator* translator ) {
-        m_translators.push_back( std::unique_ptr<const IExceptionTranslator>( translator ) );
+        m_translators.push_back( duckdb_base_std::unique_ptr<const IExceptionTranslator>( translator ) );
     }
 
 #if !defined(CATCH_CONFIG_DISABLE_EXCEPTIONS)
@@ -10816,7 +10876,10 @@ namespace Catch {
 
 namespace {
     //! Signals fatal error message to the run context
-    void reportFatal( char const * const message ) {
+    void reportFatal( char const * message ) {
+#ifdef CATCH_STACKTRACE
+        message = (const char*) CATCH_STACKTRACE(message); //enrich error message with a stacktrace
+#endif
         Catch::getCurrentContext().getResultCapture()->handleFatalErrorCondition( message );
     }
 
@@ -10938,7 +11001,9 @@ namespace Catch {
             sigaction(signalDefs[i].id, &oldSigActions[i], nullptr);
         }
         // Return the old stack
-        sigaltstack(&oldSigStack, nullptr);
+#ifndef CATCH_STACKTRACE
+        sigaltstack(&oldSigStack, nullptr); // sigaltstack prevents catch-stacktrace to work (on MacOS)
+#endif
     }
 
     static void handleSignal( int sig ) {
@@ -10977,7 +11042,9 @@ namespace Catch {
         sigStack.ss_sp = altStackMem;
         sigStack.ss_size = altStackSize;
         sigStack.ss_flags = 0;
-        sigaltstack(&sigStack, &oldSigStack);
+#ifndef CATCH_STACKTRACE
+        sigaltstack(&sigStack, &oldSigStack); // sigaltstack prevents catch-stacktrace to work (on MacOS)
+#endif
         struct sigaction sa = { };
 
         sa.sa_handler = handleSignal;
@@ -11107,8 +11174,20 @@ namespace Catch {
 // end catch_reporter_listening.h
 namespace Catch {
 
+    namespace {
+        struct NullStreambuf : std::streambuf {
+            int overflow(int c) override { return c; }
+        };
+        std::ostream& getNullStream() {
+            static NullStreambuf nullBuf;
+            static std::ostream nullStream(&nullBuf);
+            return nullStream;
+        }
+    }
+
     ReporterConfig::ReporterConfig( IConfigPtr const& _fullConfig )
-    :   m_stream( &_fullConfig->stream() ), m_fullConfig( _fullConfig ) {}
+    :   m_stream( _fullConfig->printFailingTests() ? &getNullStream() : &_fullConfig->stream() ),
+        m_fullConfig( _fullConfig ) {}
 
     ReporterConfig::ReporterConfig( IConfigPtr const& _fullConfig, std::ostream& _stream )
     :   m_stream( &_stream ), m_fullConfig( _fullConfig ) {}
@@ -11296,12 +11375,33 @@ namespace Catch {
         Catch::cout() << "name\tgroup" << std::endl;
 
         auto matchedTestCases = filterTests( getAllTestCasesSorted( config ), testSpec, config );
-        for( auto const& testCaseInfo : matchedTestCases ) {
+        auto total_tests_run = matchedTestCases.size();
+        int start_offset = 0;
+        int end_offset = total_tests_run;
+        if (config.startOffset() >= 0) {
+            start_offset = config.startOffset();
+        } else if (config.startOffsetPercentage() >= 0) {
+            start_offset = int((config.startOffsetPercentage() / 100.0) * total_tests_run);
+        }
+        if (config.endOffset() >= 0) {
+            end_offset = config.endOffset();
+        } else if (config.endOffsetPercentage() >= 0) {
+            end_offset = int((config.endOffsetPercentage() / 100.0) * total_tests_run);
+        }
+        auto it = matchedTestCases.begin();
+        for(int current_test = 0; it != matchedTestCases.end(); current_test++) {
+            if (current_test < start_offset || current_test >= end_offset) {
+                // skip this test
+                it++;
+                continue;
+            }
+            auto &testCaseInfo = *it;
             Catch::cout() << testCaseInfo.name << "\t";
             if( !testCaseInfo.tags.empty() ) {
                 Catch::cout() << testCaseInfo.tagsAsString();
             }
             Catch::cout() << std::endl;
+            it++;
         }
         return matchedTestCases.size();
     }
@@ -11631,7 +11731,8 @@ namespace Floating {
 #endif
 
     std::string WithinUlpsMatcher::describe() const {
-        std::stringstream ret;
+        duckdb_base_std::stringstream ret;
+	ret.imbue(std::locale::classic());
 
         ret << "is within " << m_ulps << " ULPs of ";
 
@@ -11886,10 +11987,10 @@ namespace Catch {
 
     Capturer::Capturer( StringRef macroName, SourceLineInfo const& lineInfo, ResultWas::OfType resultType, StringRef names ) {
         auto trimmed = [&] (size_t start, size_t end) {
-            while (names[start] == ',' || isspace(static_cast<unsigned char>(names[start]))) {
+            while (names[start] == ',' || CharacterIsSpace(static_cast<unsigned char>(names[start]))) {
                 ++start;
             }
-            while (names[end] == ',' || isspace(static_cast<unsigned char>(names[end]))) {
+            while (names[end] == ',' || CharacterIsSpace(static_cast<unsigned char>(names[end]))) {
                 --end;
             }
             return names.substr(start, end - start + 1);
@@ -12157,7 +12258,8 @@ namespace Catch {
     }
 
     std::string TempFile::getContents() {
-        std::stringstream sstr;
+        duckdb_base_std::stringstream sstr;
+	sstr.imbue(std::locale::classic());
         char buffer[100] = {};
         std::rewind(m_file);
         while (std::fgets(buffer, sizeof(buffer), m_file)) {
@@ -12319,6 +12421,7 @@ namespace Catch {
         virtual ~TestRegistry() = default;
 
         virtual void registerTest( TestCase const& testCase );
+        virtual void clearTests();
 
         std::vector<TestCase> const& getAllTests() const override;
         std::vector<TestCase> const& getAllTestsSorted( IConfig const& config ) const override;
@@ -12501,6 +12604,9 @@ namespace Catch {
             void registerTest( TestCase const& testInfo ) override {
                 m_testCaseRegistry.registerTest( testInfo );
             }
+            void clearTests() override {
+                m_testCaseRegistry.clearTests();
+            }
             void registerTranslator( const IExceptionTranslator* translator ) override {
                 m_exceptionTranslatorRegistry.registerTranslator( translator );
             }
@@ -12637,7 +12743,7 @@ namespace Catch {
                     assert( childTracker->isGeneratorTracker() );
                     tracker = std::static_pointer_cast<GeneratorTracker>( childTracker );
                 } else {
-                    tracker = std::make_shared<GeneratorTracker>( nameAndLocation, ctx, &currentTracker );
+                    tracker = duckdb_base_std::make_shared<GeneratorTracker>( nameAndLocation, ctx, &currentTracker );
                     currentTracker.addChild( tracker );
                 }
 
@@ -12767,6 +12873,7 @@ namespace Catch {
 
         auto const& testInfo = testCase.getTestCaseInfo();
 
+        onTestBegin();
         m_reporter->testCaseStarting(testInfo);
 
         m_activeTestCase = &testCase;
@@ -12780,6 +12887,10 @@ namespace Catch {
             runCurrentTest(redirectedCout, redirectedCerr);
         } while (!m_testCaseTracker->isSuccessfullyCompleted() && !aborting());
 
+        if (skippedTest()) {
+            m_totals.skippedTests++;
+            m_totals.skippedTestReasons[m_skippedTestReason]++;
+        }
         Totals deltaTotals = m_totals.delta(prevTotals);
         if (testInfo.expectedToFail() && deltaTotals.testCases.passed > 0) {
             deltaTotals.assertions.failed++;
@@ -12921,6 +13032,18 @@ namespace Catch {
 
     void RunContext::emplaceUnscopedMessage( MessageBuilder const& builder ) {
         m_messageScopes.emplace_back( builder );
+    }
+
+    void RunContext::onTestBegin() {
+        m_skippedTestReason = std::string();
+    }
+
+    void RunContext::skipTestDuringRun( std::string message ) {
+        m_skippedTestReason = std::move(message);
+    }
+
+    bool RunContext::skippedTest() {
+        return !m_skippedTestReason.empty();
     }
 
     std::string RunContext::getCurrentTestName() const {
@@ -13312,10 +13435,40 @@ namespace Catch {
 #include <set>
 #include <iterator>
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
+
 namespace Catch {
 
     namespace {
         const int MaxExitCode = 255;
+
+        // Helper function to check if stdout is a terminal
+        bool IsTerminal() {
+#ifdef _WIN32
+            return GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
+#else
+            return isatty(1);
+#endif
+        }
+
+        // Helper function to get terminal width
+        int TerminalWidth() {
+#ifdef _WIN32
+            CONSOLE_SCREEN_BUFFER_INFO csbi;
+            GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+            return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+#else
+            struct winsize w;
+            ioctl(0, TIOCGWINSZ, &w);
+            return w.ws_col;
+#endif
+        }
 
         IStreamingReporterPtr createReporter(std::string const& reporterName, IConfigPtr const& config) {
             auto reporter = Catch::getRegistryHub().getReporterRegistry().create(reporterName, config);
@@ -13324,16 +13477,45 @@ namespace Catch {
             return reporter;
         }
 
-        void renderTestProgress(int current_test, int total_tests, std::string next_test) {
+        void renderTestProgress(int current_test, int total_tests, std::string next_test, double elapsed_seconds = -1) {
             double progress = (double) current_test / (double) total_tests;
-            int render_width = 80;
-            std::string result = "[" + std::to_string(current_test) + "/" + std::to_string(total_tests) + "] (" + std::to_string(int(progress * 100)) + "%): " + next_test;
-            if (result.size() < render_width) {
-                result += std::string(render_width - result.size(), ' ');
-            } else if (result.size() > render_width) {
-                result = result.substr(0, render_width - 3) + "...";
+            std::string prefix = "[" + std::to_string(current_test) + "/" + std::to_string(total_tests) + "] (" + std::to_string(int(progress * 100)) + "%): ";
+            std::string test_label = next_test;
+            if (elapsed_seconds >= 0) {
+                char elapsed_buffer[64];
+                snprintf(elapsed_buffer, sizeof(elapsed_buffer), " took %.3fs", elapsed_seconds);
+                test_label += elapsed_buffer;
             }
-            std::cout << "\r" << result;
+            std::string result = prefix + test_label;
+
+            if (IsTerminal()) {
+                // For terminals, we want to overwrite the previous line to not flood the window with successful tests.
+                // We overwrite by writing \r at the end of the block, but to make sure we fully overwrite the previous
+                // line we should make sure the line fits fully in the terminal width.
+                int render_width = TerminalWidth();
+                if (render_width <= 0) {
+                    render_width = 80; // fallback to 80 if we can't determine width
+                }
+
+                if (result.size() < static_cast<size_t>(render_width)) {
+                    result += std::string(render_width - result.size(), ' ');
+                } else if (result.size() > static_cast<size_t>(render_width)) {
+                    int available_for_test = render_width - prefix.size() - 3; // 3 for "..."
+                    if (available_for_test > 0 && test_label.size() > static_cast<size_t>(available_for_test)) {
+                        // Replace the start of the test name with "..." to indicate truncation
+                        result = prefix + "..." + test_label.substr(test_label.size() - available_for_test);
+                    } else {
+                        // If prefix is too long for terminal width, fall back to simple truncation
+                        result = result.substr(0, render_width - 3) + "...";
+                    }
+                }
+
+                std::cout << "\r" << result;
+            } else {
+                // For non-terminals, we just print each line
+                std::cout << "\n" << result;
+            }
+
             std::cout.flush();
         }
 
@@ -13347,7 +13529,7 @@ namespace Catch {
             // doesn't compile without a std::move call. However, this causes
             // a warning on newer platforms. Thus, we have to work around
             // it a bit and downcast the pointer manually.
-            auto ret = std::unique_ptr<IStreamingReporter>(new ListeningReporter);
+            auto ret = duckdb_base_std::unique_ptr<IStreamingReporter>(new ListeningReporter);
             auto& multi = static_cast<ListeningReporter&>(*ret);
             auto const& listeners = Catch::getRegistryHub().getReporterRegistry().getListeners();
             for (auto const& listener : listeners) {
@@ -13384,6 +13566,7 @@ namespace Catch {
 
                 int total_tests_run = m_tests.size();
                 int current_test = 0;
+                bool rendered_initial_progress = false;
 
                 int start_offset = 0;
                 int end_offset = total_tests_run;
@@ -13404,12 +13587,20 @@ namespace Catch {
                             current_test++;
                             continue;
                         }
-                        renderTestProgress(current_test, total_tests_run, testCase->name);
-                        totals += m_context.runTest(*testCase);
-                        current_test++;
-                        if (current_test == total_tests_run) {
+                        if (!m_config->printFailingTests() && !rendered_initial_progress) {
                             renderTestProgress(current_test, total_tests_run, testCase->name);
-                            std::cout << std::endl;
+                            rendered_initial_progress = true;
+                        }
+                        Timer timer;
+                        timer.start();
+                        totals += m_context.runTest(*testCase);
+                        double elapsed_seconds = timer.getElapsedSeconds();
+                        current_test++;
+                        if (!m_config->printFailingTests()) {
+                            renderTestProgress(current_test, total_tests_run, testCase->name, elapsed_seconds);
+                            if (current_test == total_tests_run) {
+                                std::cout << std::endl;
+                            }
                         }
                     } else {
                         m_context.reporter().skipTest(*testCase);
@@ -13592,7 +13783,7 @@ namespace Catch {
     }
     Config& Session::config() {
         if( !m_config )
-            m_config = std::make_shared<Config>( m_configData );
+            m_config = duckdb_base_std::make_shared<Config>( m_configData );
         return *m_config;
     }
 
@@ -13779,7 +13970,7 @@ namespace Catch {
         ///////////////////////////////////////////////////////////////////////////
 
         class DebugOutStream : public IStream {
-            std::unique_ptr<StreamBufImpl<OutputDebugWriter>> m_streamBuf;
+            duckdb_base_std::unique_ptr<StreamBufImpl<OutputDebugWriter>> m_streamBuf;
             mutable std::ostream m_os;
         public:
             DebugOutStream()
@@ -13812,13 +14003,13 @@ namespace Catch {
 
     // This class encapsulates the idea of a pool of ostringstreams that can be reused.
     struct StringStreams {
-        std::vector<std::unique_ptr<std::ostringstream>> m_streams;
+        std::vector<duckdb_base_std::unique_ptr<std::ostringstream>> m_streams;
         std::vector<std::size_t> m_unused;
         std::ostringstream m_referenceStream; // Used for copy state/ flags from
 
         auto add() -> std::size_t {
             if( m_unused.empty() ) {
-                m_streams.push_back( std::unique_ptr<std::ostringstream>( new std::ostringstream ) );
+                m_streams.push_back( duckdb_base_std::unique_ptr<std::ostringstream>( new std::ostringstream ) );
                 return m_streams.size()-1;
             }
             else {
@@ -14367,6 +14558,10 @@ namespace Catch {
         m_functions.push_back( testCase );
     }
 
+    void TestRegistry::clearTests() {
+        m_functions.clear();
+    }
+
     std::vector<TestCase> const& TestRegistry::getAllTests() const {
         return m_functions;
     }
@@ -14427,7 +14622,7 @@ namespace TestCaseTracking {
     ITracker::~ITracker() = default;
 
     ITracker& TrackerContext::startRun() {
-        m_rootTracker = std::make_shared<SectionTracker>( NameAndLocation( "{root}", CATCH_INTERNAL_LINEINFO ), *this, nullptr );
+        m_rootTracker = duckdb_base_std::make_shared<SectionTracker>( NameAndLocation( "{root}", CATCH_INTERNAL_LINEINFO ), *this, nullptr );
         m_currentTracker = nullptr;
         m_runState = Executing;
         return *m_rootTracker;
@@ -14598,7 +14793,7 @@ namespace TestCaseTracking {
             section = std::static_pointer_cast<SectionTracker>( childTracker );
         }
         else {
-            section = std::make_shared<SectionTracker>( nameAndLocation, ctx, &currentTracker );
+            section = duckdb_base_std::make_shared<SectionTracker>( nameAndLocation, ctx, &currentTracker );
             currentTracker.addChild( section );
         }
         if( !ctx.completedCycle() )
@@ -14948,9 +15143,9 @@ namespace Catch {
         auto token = preprocessPattern();
 
         if (!token.empty()) {
-            TestSpec::PatternPtr pattern = std::make_shared<TestSpec::NamePattern>(token, m_substring);
+            TestSpec::PatternPtr pattern = duckdb_base_std::make_shared<TestSpec::NamePattern>(token, m_substring);
             if (m_exclusion)
-                pattern = std::make_shared<TestSpec::ExcludedPattern>(pattern);
+                pattern = duckdb_base_std::make_shared<TestSpec::ExcludedPattern>(pattern);
             m_currentFilter.m_patterns.push_back(pattern);
         }
         m_substring.clear();
@@ -14966,17 +15161,17 @@ namespace Catch {
             // we have to create a separate hide tag and shorten the real one
             if (token.size() > 1 && token[0] == '.') {
                 token.erase(token.begin());
-                TestSpec::PatternPtr pattern = std::make_shared<TestSpec::TagPattern>(".", m_substring);
+                TestSpec::PatternPtr pattern = duckdb_base_std::make_shared<TestSpec::TagPattern>(".", m_substring);
                 if (m_exclusion) {
-                    pattern = std::make_shared<TestSpec::ExcludedPattern>(pattern);
+                    pattern = duckdb_base_std::make_shared<TestSpec::ExcludedPattern>(pattern);
                 }
                 m_currentFilter.m_patterns.push_back(pattern);
             }
 
-            TestSpec::PatternPtr pattern = std::make_shared<TestSpec::TagPattern>(token, m_substring);
+            TestSpec::PatternPtr pattern = duckdb_base_std::make_shared<TestSpec::TagPattern>(token, m_substring);
 
             if (m_exclusion) {
-                pattern = std::make_shared<TestSpec::ExcludedPattern>(pattern);
+                pattern = duckdb_base_std::make_shared<TestSpec::ExcludedPattern>(pattern);
             }
             m_currentFilter.m_patterns.push_back(pattern);
         }
@@ -15342,12 +15537,17 @@ namespace Catch {
         Totals diff;
         diff.assertions = assertions - other.assertions;
         diff.testCases = testCases - other.testCases;
+        diff.skippedTests = skippedTests - other.skippedTests;
         return diff;
     }
 
     Totals& Totals::operator += ( Totals const& other ) {
         assertions += other.assertions;
         testCases += other.testCases;
+        skippedTests += other.skippedTests;
+        for(auto &entry : other.skippedTestReasons) {
+            skippedTestReasons[entry.first] += entry.second;
+        }
         return *this;
     }
 
@@ -16329,18 +16529,21 @@ private:
     bool printInfoMessages;
 };
 
-std::size_t makeRatio(std::size_t number, std::size_t total) {
-    std::size_t ratio = total > 0 ? CATCH_CONFIG_CONSOLE_WIDTH * number / total : 0;
-    return (ratio == 0 && number > 0) ? 1 : ratio;
+std::size_t makeRatio(std::uint64_t number, std::uint64_t total) {
+    const auto ratio = total > 0 ? CATCH_CONFIG_CONSOLE_WIDTH * number / total : 0;
+    return (ratio == 0 && number > 0) ? 1 : static_cast<std::size_t>(ratio);
 }
 
-std::size_t& findMax(std::size_t& i, std::size_t& j, std::size_t& k) {
-    if (i > j && i > k)
+std::size_t&
+findMax( std::size_t& i, std::size_t& j, std::size_t& k, std::size_t& l ) {
+    if (i > j && i > k && i > l)
         return i;
-    else if (j > k)
+    else if (j > k && j > l)
         return j;
-    else
+    else if (k > l)
         return k;
+    else
+        return l;
 }
 
 struct ColumnInfo {
@@ -16634,6 +16837,9 @@ void ConsoleReporter::benchmarkFailed(std::string const& error) {
 
 void ConsoleReporter::testCaseEnded(TestCaseStats const& _testCaseStats) {
     m_tablePrinter->close();
+    if (_testCaseStats.totals.testCases.failed > 0) {
+        m_failedTestNames.push_back(_testCaseStats.testInfo.name);
+    }
     StreamingReporterBase::testCaseEnded(_testCaseStats);
     m_headerPrinted = false;
 }
@@ -16647,9 +16853,15 @@ void ConsoleReporter::testGroupEnded(TestGroupStats const& _testGroupStats) {
     StreamingReporterBase::testGroupEnded(_testGroupStats);
 }
 void ConsoleReporter::testRunEnded(TestRunStats const& _testRunStats) {
-    printTotalsDivider(_testRunStats.totals);
-    printTotals(_testRunStats.totals);
-    stream << std::endl;
+    if (m_config->printFailingTests()) {
+        for (auto const& name : m_failedTestNames) {
+            std::cout << name << "\n";
+        }
+    } else {
+        printTotalsDivider(_testRunStats.totals);
+        printTotals(_testRunStats.totals);
+        stream << std::endl;
+    }
     StreamingReporterBase::testRunEnded(_testRunStats);
 }
 void ConsoleReporter::testRunStarting(TestRunInfo const& _testInfo) {
@@ -16764,16 +16976,22 @@ struct SummaryColumn {
 };
 
 void ConsoleReporter::printTotals( Totals const& totals ) {
-    if (totals.testCases.total() == 0) {
+    if (totals.testCases.total()  == 0) {
         stream << Colour(Colour::Warning) << "No tests ran\n";
+    } else if (totals.skippedTests >= totals.testCases.total()) {
+        stream << Colour(Colour::ResultError) << "All tests were skipped (total skipped " << totals.skippedTests <<  ")" << "\n";
     } else if (totals.assertions.total() > 0 && totals.testCases.allPassed()) {
         stream << Colour(Colour::ResultSuccess) << "All tests passed";
-        stream << " ("
+        stream << " (";
+        if (totals.skippedTests > 0) {
+            stream << Colour(Colour::Warning) <<  pluralise(totals.skippedTests, "skipped test") << ", ";
+        }
+        stream
             << pluralise(totals.assertions.passed, "assertion") << " in "
-            << pluralise(totals.testCases.passed, "test case") << ')'
-            << '\n';
+            << pluralise(totals.testCases.passed - totals.skippedTests, "test case");
+        stream
+            << ')' << '\n';
     } else {
-
         std::vector<SummaryColumn> columns;
         columns.push_back(SummaryColumn("", Colour::None)
                           .addRow(totals.testCases.total())
@@ -16784,9 +17002,9 @@ void ConsoleReporter::printTotals( Totals const& totals ) {
         columns.push_back(SummaryColumn("failed", Colour::ResultError)
                           .addRow(totals.testCases.failed)
                           .addRow(totals.assertions.failed));
-        columns.push_back(SummaryColumn("failed as expected", Colour::ResultExpectedFailure)
-                          .addRow(totals.testCases.failedButOk)
-                          .addRow(totals.assertions.failedButOk));
+        columns.push_back(SummaryColumn("skipped", Colour::ResultExpectedFailure)
+                          .addRow(totals.testCases.failedButOk + totals.skippedTests)
+                          .addRow(totals.assertions.failedButOk + totals.skippedTests));
 
         printSummaryRow("test cases", columns, 0);
         printSummaryRow("assertions", columns, 1);
@@ -16812,13 +17030,15 @@ void ConsoleReporter::printSummaryRow(std::string const& label, std::vector<Summ
 
 void ConsoleReporter::printTotalsDivider(Totals const& totals) {
     if (totals.testCases.total() > 0) {
-        std::size_t failedRatio = makeRatio(totals.testCases.failed, totals.testCases.total());
-        std::size_t failedButOkRatio = makeRatio(totals.testCases.failedButOk, totals.testCases.total());
-        std::size_t passedRatio = makeRatio(totals.testCases.passed, totals.testCases.total());
-        while (failedRatio + failedButOkRatio + passedRatio < CATCH_CONFIG_CONSOLE_WIDTH - 1)
-            findMax(failedRatio, failedButOkRatio, passedRatio)++;
-        while (failedRatio + failedButOkRatio + passedRatio > CATCH_CONFIG_CONSOLE_WIDTH - 1)
-            findMax(failedRatio, failedButOkRatio, passedRatio)--;
+		const std::size_t total = totals.testCases.total() + totals.skippedTests;
+        std::size_t failedRatio = makeRatio(totals.testCases.failed, total);
+        std::size_t failedButOkRatio = makeRatio(totals.testCases.failedButOk, total);
+        std::size_t passedRatio = makeRatio(totals.testCases.passed, total);
+		std::size_t skippedRatio = makeRatio(totals.skippedTests, total);
+        while (failedRatio + failedButOkRatio + passedRatio + skippedRatio < CATCH_CONFIG_CONSOLE_WIDTH - 1)
+            findMax(failedRatio, failedButOkRatio, passedRatio, skippedRatio)++;
+        while (failedRatio + failedButOkRatio + passedRatio + skippedRatio > CATCH_CONFIG_CONSOLE_WIDTH - 1)
+            findMax(failedRatio, failedButOkRatio, passedRatio, skippedRatio)--;
 
         stream << Colour(Colour::Error) << std::string(failedRatio, '=');
         stream << Colour(Colour::ResultExpectedFailure) << std::string(failedButOkRatio, '=');
@@ -16838,7 +17058,10 @@ void ConsoleReporter::printSummaryDivider() {
 void ConsoleReporter::printTestFilters() {
     if (m_config->testSpec().hasFilters()) {
         Colour guard(Colour::BrightYellow);
-        stream << "Filters: " << serializeFilters(m_config->getTestsOrTags()) << '\n';
+        auto test_list_file = m_config->getTestListFile();
+        if (test_list_file.empty()) {
+            stream << "Filters: " << serializeFilters(m_config->getTestsOrTags()) << '\n';
+        }
     }
 }
 
@@ -17758,6 +17981,7 @@ int main (int argc, char * const argv[]) {
 #define UNSCOPED_INFO( msg ) INTERNAL_CATCH_UNSCOPED_INFO( "UNSCOPED_INFO", msg )
 #define WARN( msg ) INTERNAL_CATCH_MSG( "WARN", Catch::ResultWas::Warning, Catch::ResultDisposition::ContinueOnFailure, msg )
 #define CAPTURE( ... ) INTERNAL_CATCH_CAPTURE( INTERNAL_CATCH_UNIQUE_NAME(capturer), "CAPTURE",__VA_ARGS__ )
+#define SKIP_TEST( reason ) INTERNAL_CATCH_SKIP_TEST( reason )
 
 #define TEST_CASE( ... ) INTERNAL_CATCH_TESTCASE( __VA_ARGS__ )
 #define TEST_CASE_METHOD( className, ... ) INTERNAL_CATCH_TEST_CASE_METHOD( className, __VA_ARGS__ )
@@ -18025,4 +18249,3 @@ using Catch::Detail::Approx;
 // end catch_reenable_warnings.h
 // end catch.hpp
 #endif // TWOBLUECUBES_SINGLE_INCLUDE_CATCH_HPP_INCLUDED
-

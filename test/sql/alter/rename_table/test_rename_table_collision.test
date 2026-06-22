@@ -2,6 +2,9 @@
 # description: Test RENAME TABLE multiple transactions with rename after drop
 # group: [rename_table]
 
+statement ok
+SET default_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
+
 statement ok con1
 CREATE TABLE t1(i INTEGER);
 
@@ -56,6 +59,7 @@ SELECT i FROM t2 ORDER BY i;
 
 statement error con1
 SELECT * FROM t1
+----
 
 
 # Now we're going to do a rollback instead of a commit
@@ -68,9 +72,11 @@ ALTER TABLE t2 RENAME TO t3;
 
 statement error con1
 SELECT i FROM t3 ORDER BY i
+----
 
 statement error con2
 SELECT i FROM t2 ORDER BY i
+----
 
 query I con2
 SELECT i FROM t3 ORDER BY i
@@ -132,6 +138,7 @@ ALTER TABLE t2 RENAME TO t3
 
 statement error con2
 CREATE TABLE t3 (i INTEGER)
+----
 
 statement ok con1
 ROLLBACK
@@ -152,6 +159,7 @@ ALTER TABLE t2 RENAME TO t3
 
 statement error con1
 ALTER TABLE t2 RENAME TO t4
+----
 
 statement ok con1
 ROLLBACK
@@ -183,9 +191,11 @@ DROP TABLE e1
 
 statement error con1
 ALTER TABLE e1 RENAME TO e2
+----
 
 statement error con2
 ALTER TABLE e2 RENAME TO e1
+----
 
 statement ok con1
 ROLLBACK

@@ -1,203 +1,300 @@
 #include "duckdb/catalog/default/default_functions.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
-#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_macro_catalog_entry.hpp"
-#include "duckdb/function/table_macro_function.hpp"
-
-#include "duckdb/function/scalar_macro_function.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 
 namespace duckdb {
 
-static DefaultMacro internal_macros[] = {
-	{DEFAULT_SCHEMA, "current_user", {nullptr}, "'duckdb'"},                       // user name of current execution context
-	{DEFAULT_SCHEMA, "current_catalog", {nullptr}, "'duckdb'"},                    // name of current database (called "catalog" in the SQL standard)
-	{DEFAULT_SCHEMA, "current_database", {nullptr}, "'duckdb'"},                   // name of current database
-	{DEFAULT_SCHEMA, "user", {nullptr}, "current_user"},                           // equivalent to current_user
-	{DEFAULT_SCHEMA, "session_user", {nullptr}, "'duckdb'"},                       // session user name
-	{"pg_catalog", "inet_client_addr", {nullptr}, "NULL"},                       // address of the remote connection
-	{"pg_catalog", "inet_client_port", {nullptr}, "NULL"},                       // port of the remote connection
-	{"pg_catalog", "inet_server_addr", {nullptr}, "NULL"},                       // address of the local connection
-	{"pg_catalog", "inet_server_port", {nullptr}, "NULL"},                       // port of the local connection
-	{"pg_catalog", "pg_my_temp_schema", {nullptr}, "0"},                         // OID of session's temporary schema, or 0 if none
-	{"pg_catalog", "pg_is_other_temp_schema", {"schema_id", nullptr}, "false"},  // is schema another session's temporary schema?
+static const DefaultMacro internal_macros[] = {
+    {DEFAULT_SCHEMA, "current_role", "() AS 'duckdb'"}, // user name of current execution context
+    {DEFAULT_SCHEMA, "current_user", "() AS 'duckdb'"}, // user name of current execution context
+    {DEFAULT_SCHEMA, "current_catalog",
+     "() AS main.current_database()"},              // name of current database (called "catalog" in the SQL standard)
+    {DEFAULT_SCHEMA, "user", "() AS current_user"}, // equivalent to current_user
+    {DEFAULT_SCHEMA, "session_user", "() AS 'duckdb'"}, // session user name
+    {"pg_catalog", "inet_client_addr", "() AS NULL"},   // address of the remote connection
+    {"pg_catalog", "inet_client_port", "() AS NULL"},   // port of the remote connection
+    {"pg_catalog", "inet_server_addr", "() AS NULL"},   // address of the local connection
+    {"pg_catalog", "inet_server_port", "() AS NULL"},   // port of the local connection
+    {"pg_catalog", "pg_my_temp_schema", "() AS 0"},     // OID of session's temporary schema, or 0 if none
+    {"pg_catalog", "pg_is_other_temp_schema", "(schema_id) AS false"}, // is schema another session's temporary schema?
 
-	{"pg_catalog", "pg_conf_load_time", {nullptr}, "current_timestamp"},         // configuration load time
-	{"pg_catalog", "pg_postmaster_start_time", {nullptr}, "current_timestamp"},  // server start time
+    {"pg_catalog", "pg_conf_load_time", "() AS current_timestamp"},        // configuration load time
+    {"pg_catalog", "pg_postmaster_start_time", "() AS current_timestamp"}, // server start time
 
-	{"pg_catalog", "pg_typeof", {"expression", nullptr}, "lower(typeof(expression))"},  // get the data type of any value
+    {"pg_catalog", "pg_typeof", "(expression) AS lower(typeof(expression))"}, // get the data type of any value
 
-	// privilege functions
-	// {"has_any_column_privilege", {"user", "table", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for any column of table
-	{"pg_catalog", "has_any_column_privilege", {"table", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for any column of table
-	// {"has_column_privilege", {"user", "table", "column", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for column
-	{"pg_catalog", "has_column_privilege", {"table", "column", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for column
-	// {"has_database_privilege", {"user", "database", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for database
-	{"pg_catalog", "has_database_privilege", {"database", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for database
-	// {"has_foreign_data_wrapper_privilege", {"user", "fdw", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for foreign-data wrapper
-	{"pg_catalog", "has_foreign_data_wrapper_privilege", {"fdw", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for foreign-data wrapper
-	// {"has_function_privilege", {"user", "function", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for function
-	{"pg_catalog", "has_function_privilege", {"function", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for function
-	// {"has_language_privilege", {"user", "language", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for language
-	{"pg_catalog", "has_language_privilege", {"language", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for language
-	// {"has_schema_privilege", {"user", "schema, privilege", nullptr}, "true"},  //boolean  //does user have privilege for schema
-	{"pg_catalog", "has_schema_privilege", {"schema", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for schema
-	// {"has_sequence_privilege", {"user", "sequence", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for sequence
-	{"pg_catalog", "has_sequence_privilege", {"sequence", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for sequence
-	// {"has_server_privilege", {"user", "server", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for foreign server
-	{"pg_catalog", "has_server_privilege", {"server", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for foreign server
-	// {"has_table_privilege", {"user", "table", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for table
-	{"pg_catalog", "has_table_privilege", {"table", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for table
-	// {"has_tablespace_privilege", {"user", "tablespace", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for tablespace
-	{"pg_catalog", "has_tablespace_privilege", {"tablespace", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for tablespace
+    {"pg_catalog", "current_database",
+     "() AS system.main.current_database()"}, // name of current database (called "catalog" in the SQL standard)
+    {"pg_catalog", "current_query",
+     "() AS system.main.current_query()"}, // the currently executing query (NULL if not inside a plpgsql function)
+    {"pg_catalog", "current_schema", "() AS system.main.current_schema()"}, // name of current schema
+    {"pg_catalog", "current_schemas",
+     "(include_implicit) AS system.main.current_schemas(include_implicit)"}, // names of schemas in search path
 
-	// various postgres system functions
-	{"pg_catalog", "pg_get_viewdef", {"oid", nullptr}, "(select sql from duckdb_views() v where v.view_oid=oid)"},
-	{"pg_catalog", "pg_get_constraintdef", {"constraint_oid", "pretty_bool", nullptr}, "(select constraint_text from duckdb_constraints() d_constraint where d_constraint.table_oid=constraint_oid/1000000 and d_constraint.constraint_index=constraint_oid%1000000)"},
-	{"pg_catalog", "pg_get_expr", {"pg_node_tree", "relation_oid", nullptr}, "pg_node_tree"},
-	{"pg_catalog", "format_pg_type", {"type_name", nullptr}, "case when logical_type='FLOAT' then 'real' when logical_type='DOUBLE' then 'double precision' when logical_type='DECIMAL' then 'numeric' when logical_type='VARCHAR' then 'character varying' when logical_type='BLOB' then 'bytea' when logical_type='TIMESTAMP' then 'timestamp without time zone' when logical_type='TIME' then 'time without time zone' else lower(logical_type) end"},
-	{"pg_catalog", "format_type", {"type_oid", "typemod", nullptr}, "(select format_pg_type(type_name) from duckdb_types() t where t.type_oid=type_oid) || case when typemod>0 then concat('(', typemod/1000, ',', typemod%1000, ')') else '' end"},
+    // privilege functions
+    {"pg_catalog", "has_any_column_privilege",
+     "(\"table\", privilege) AS true, (user, \"table\", privilege) AS true"}, // boolean  //does current/named user have
+                                                                              // privilege for any column of table
+    {"pg_catalog", "has_column_privilege",
+     "(\"table\", \"column\", privilege) AS true, (user, \"table\", \"column\", privilege) AS true"}, // boolean  //does
+                                                                                                      // current/named
+                                                                                                      // user have
+                                                                                                      // privilege for
+                                                                                                      // column
+    {"pg_catalog", "has_database_privilege",
+     "(database, privilege) AS true, (user, database, privilege) AS true"}, // boolean  //does current/named user have
+                                                                            // privilege for database
+    {"pg_catalog", "has_foreign_data_wrapper_privilege",
+     "(fdw, privilege) AS true, (user, fdw, privilege) AS true"}, // boolean  //does current/named user have privilege
+                                                                  // for foreign-data wrapper
+    {"pg_catalog", "has_function_privilege",
+     "(function, privilege) AS true, (user, function, privilege) AS true"}, // boolean  //does current/named user have
+                                                                            // privilege for function
+    {"pg_catalog", "has_language_privilege",
+     "(language, privilege) AS true, (user, language, privilege) AS true"}, // boolean  //does current/named user have
+                                                                            // privilege for language
+    {"pg_catalog", "has_schema_privilege",
+     "(schema, privilege) AS true, (user, schema, privilege) AS true"}, // boolean  //does current/named user have
+                                                                        // privilege for schema
+    {"pg_catalog", "has_sequence_privilege",
+     "(sequence, privilege) AS true, (user, sequence, privilege) AS true"}, // boolean  //does current/named user have
+                                                                            // privilege for sequence
+    {"pg_catalog", "has_server_privilege",
+     "(server, privilege) AS true, (user, server, privilege) AS true"}, // boolean  //does current/named user have
+                                                                        // privilege for foreign server
+    {"pg_catalog", "has_table_privilege",
+     "(\"table\", privilege) AS true, (user, \"table\", privilege) AS true"}, // boolean  //does current/named user have
+                                                                              // privilege for table
+    {"pg_catalog", "has_tablespace_privilege",
+     "(tablespace, privilege) AS true, (user, tablespace, privilege) AS true"}, // boolean  //does current/named user
+                                                                                // have privilege for tablespace
 
-	{"pg_catalog", "pg_has_role", {"user", "role", "privilege", nullptr}, "true"},  //boolean  //does user have privilege for role
-	{"pg_catalog", "pg_has_role", {"role", "privilege", nullptr}, "true"},  //boolean  //does current user have privilege for role
+    // various postgres system functions
+    {"pg_catalog", "pg_get_viewdef", "(oid) AS (select sql from duckdb_views() v where v.view_oid=oid)"},
+    {"pg_catalog", "pg_get_constraintdef",
+     "(constraint_oid) AS (select constraint_text from duckdb_constraints() d_constraint where "
+     "d_constraint.table_oid=constraint_oid//1000000 and d_constraint.constraint_index=constraint_oid%1000000), "
+     "(constraint_oid, pretty_bool) AS pg_get_constraintdef(constraint_oid)"},
+    {"pg_catalog", "pg_get_expr", "(pg_node_tree, relation_oid) AS pg_node_tree"},
+    {"pg_catalog", "format_pg_type",
+     "(logical_type, type_name) AS case upper(logical_type) when 'FLOAT' then 'float4' when 'DOUBLE' then 'float8' "
+     "when 'DECIMAL' then 'numeric' when 'ENUM' then lower(type_name) when 'VARCHAR' then 'varchar' when 'BLOB' then "
+     "'bytea' when 'TIMESTAMP' then 'timestamp' when 'TIME' then 'time' when 'TIMESTAMP WITH TIME ZONE' then "
+     "'timestamptz' when 'TIME WITH TIME ZONE' then 'timetz' when 'SMALLINT' then 'int2' when 'INTEGER' then 'int4' "
+     "when 'BIGINT' then 'int8' when 'BOOLEAN' then 'bool' else lower(logical_type) end"},
+    {"pg_catalog", "format_type",
+     "(type_oid, typemod) AS (select format_pg_type(logical_type, type_name) from duckdb_types() t where "
+     "t.type_oid=type_oid) || case when typemod>0 then concat('(', typemod//1000, ',', typemod%1000, ')') else '' end"},
+    {"pg_catalog", "map_to_pg_oid",
+     "(type_name) AS case type_name when 'bool' then 16 when 'int16' then 21 when 'int' then 23 when 'bigint' then 20 "
+     "when 'date' then 1082 when 'time' then 1083 when 'datetime' then 1114 when 'dec' then 1700 when 'float' then 700 "
+     "when 'double' then 701 when 'bpchar' then 1043 when 'binary' then 17 when 'interval' then 1186 when "
+     "'timestamptz' then 1184 when 'timestamp with time zone' then 1184 when 'timetz' then 1266 when 'time with time "
+     "zone' then 1266 when 'bit' then 1560 when 'guid' then 2950 else null end"}, // map duckdb_oid to pg_oid. If no
+                                                                                  // corresponding type, return null
 
-	{"pg_catalog", "col_description", {"table_oid", "column_number", nullptr}, "NULL"},   // get comment for a table column
-	{"pg_catalog", "obj_description", {"object_oid", "catalog_name", nullptr}, "NULL"},   // get comment for a database object
-	{"pg_catalog", "shobj_description", {"object_oid", "catalog_name", nullptr}, "NULL"}, // get comment for a shared database object
+    {"pg_catalog", "pg_has_role",
+     "(user, role, privilege) AS true, (role, privilege) AS true"}, // boolean  //does current/named user have privilege
+                                                                    // for role
 
-	// visibility functions
-	{"pg_catalog", "pg_collation_is_visible", {"collation_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_conversion_is_visible", {"conversion_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_function_is_visible", {"function_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_opclass_is_visible", {"opclass_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_operator_is_visible", {"operator_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_opfamily_is_visible", {"opclass_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_table_is_visible", {"table_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_ts_config_is_visible", {"config_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_ts_dict_is_visible", {"dict_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_ts_parser_is_visible", {"parser_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_ts_template_is_visible", {"template_oid", nullptr}, "true"},
-	{"pg_catalog", "pg_type_is_visible", {"type_oid", nullptr}, "true"},
+    {"pg_catalog", "col_description", "(table_oid, column_number) AS NULL"}, // get comment for a table column
+    {"pg_catalog", "obj_description", "(object_oid, catalog_name) AS NULL"}, // get comment for a database object
+    {"pg_catalog", "shobj_description",
+     "(object_oid, catalog_name) AS NULL"}, // get comment for a shared database object
 
-	{DEFAULT_SCHEMA, "round_even", {"x", "n", nullptr}, "CASE ((abs(x) * power(10, n+1)) % 10) WHEN 5 THEN round(x/2, n) * 2 ELSE round(x, n) END"},
-	{DEFAULT_SCHEMA, "roundbankers", {"x", "n", nullptr}, "round_even(x, n)"},
-	{DEFAULT_SCHEMA, "nullif", {"a", "b", nullptr}, "CASE WHEN a=b THEN NULL ELSE a END"},
-	{DEFAULT_SCHEMA, "list_append", {"l", "e", nullptr}, "list_concat(l, list_value(e))"},
-	{DEFAULT_SCHEMA, "array_append", {"arr", "el", nullptr}, "list_append(arr, el)"},
-	{DEFAULT_SCHEMA, "list_prepend", {"e", "l", nullptr}, "list_concat(list_value(e), l)"},
-	{DEFAULT_SCHEMA, "array_prepend", {"el", "arr", nullptr}, "list_prepend(el, arr)"},
-	{DEFAULT_SCHEMA, "array_pop_back", {"arr", nullptr}, "arr[:LEN(arr)-1]"},
-	{DEFAULT_SCHEMA, "array_pop_front", {"arr", nullptr}, "arr[2:]"},
-	{DEFAULT_SCHEMA, "array_push_back", {"arr", "e", nullptr}, "list_concat(arr, list_value(e))"},
-	{DEFAULT_SCHEMA, "array_push_front", {"arr", "e", nullptr}, "list_concat(list_value(e), arr)"},
-	{DEFAULT_SCHEMA, "generate_subscripts", {"arr", "dim", nullptr}, "unnest(generate_series(1, array_length(arr, dim)))"},
-	{DEFAULT_SCHEMA, "fdiv", {"x", "y", nullptr}, "floor(x/y)"},
-	{DEFAULT_SCHEMA, "fmod", {"x", "y", nullptr}, "(x-y*floor(x/y))"},
+    // visibility functions
+    {"pg_catalog", "pg_collation_is_visible", "(collation_oid) AS true"},
+    {"pg_catalog", "pg_conversion_is_visible", "(conversion_oid) AS true"},
+    {"pg_catalog", "pg_function_is_visible", "(function_oid) AS true"},
+    {"pg_catalog", "pg_opclass_is_visible", "(opclass_oid) AS true"},
+    {"pg_catalog", "pg_operator_is_visible", "(operator_oid) AS true"},
+    {"pg_catalog", "pg_opfamily_is_visible", "(opclass_oid) AS true"},
+    {"pg_catalog", "pg_table_is_visible", "(table_oid) AS true"},
+    {"pg_catalog", "pg_ts_config_is_visible", "(config_oid) AS true"},
+    {"pg_catalog", "pg_ts_dict_is_visible", "(dict_oid) AS true"},
+    {"pg_catalog", "pg_ts_parser_is_visible", "(parser_oid) AS true"},
+    {"pg_catalog", "pg_ts_template_is_visible", "(template_oid) AS true"},
+    {"pg_catalog", "pg_type_is_visible", "(type_oid) AS true"},
 
-	// algebraic list aggregates
-	{DEFAULT_SCHEMA, "list_avg", {"l", nullptr}, "list_aggr(l, 'avg')"},
-	{DEFAULT_SCHEMA, "list_var_samp", {"l", nullptr}, "list_aggr(l, 'var_samp')"},
-	{DEFAULT_SCHEMA, "list_var_pop", {"l", nullptr}, "list_aggr(l, 'var_pop')"},
-	{DEFAULT_SCHEMA, "list_stddev_pop", {"l", nullptr}, "list_aggr(l, 'stddev_pop')"},
-	{DEFAULT_SCHEMA, "list_stddev_samp", {"l", nullptr}, "list_aggr(l, 'stddev_samp')"},
-	{DEFAULT_SCHEMA, "list_sem", {"l", nullptr}, "list_aggr(l, 'sem')"},
+    {"pg_catalog", "pg_size_pretty", "(bytes) AS format_bytes(bytes)"},
+    {"pg_catalog", "pg_sleep", "(seconds) AS sleep_ms(CAST(seconds * 1000 AS BIGINT))"},
 
-	// distributive list aggregates
-	{DEFAULT_SCHEMA, "list_approx_count_distinct", {"l", nullptr}, "list_aggr(l, 'approx_count_distinct')"},
-	{DEFAULT_SCHEMA, "list_bit_xor", {"l", nullptr}, "list_aggr(l, 'bit_xor')"},
-	{DEFAULT_SCHEMA, "list_bit_or", {"l", nullptr}, "list_aggr(l, 'bit_or')"},
-	{DEFAULT_SCHEMA, "list_bit_and", {"l", nullptr}, "list_aggr(l, 'bit_and')"},
-	{DEFAULT_SCHEMA, "list_bool_and", {"l", nullptr}, "list_aggr(l, 'bool_and')"},
-	{DEFAULT_SCHEMA, "list_bool_or", {"l", nullptr}, "list_aggr(l, 'bool_or')"},
-	{DEFAULT_SCHEMA, "list_count", {"l", nullptr}, "list_aggr(l, 'count')"},
-	{DEFAULT_SCHEMA, "list_entropy", {"l", nullptr}, "list_aggr(l, 'entropy')"},
-	{DEFAULT_SCHEMA, "list_last", {"l", nullptr}, "list_aggr(l, 'last')"},
-	{DEFAULT_SCHEMA, "list_first", {"l", nullptr}, "list_aggr(l, 'first')"},
-	{DEFAULT_SCHEMA, "list_any_value", {"l", nullptr}, "list_aggr(l, 'any_value')"},
-	{DEFAULT_SCHEMA, "list_kurtosis", {"l", nullptr}, "list_aggr(l, 'kurtosis')"},
-	{DEFAULT_SCHEMA, "list_min", {"l", nullptr}, "list_aggr(l, 'min')"},
-	{DEFAULT_SCHEMA, "list_max", {"l", nullptr}, "list_aggr(l, 'max')"},
-	{DEFAULT_SCHEMA, "list_product", {"l", nullptr}, "list_aggr(l, 'product')"},
-	{DEFAULT_SCHEMA, "list_skewness", {"l", nullptr}, "list_aggr(l, 'skewness')"},
-	{DEFAULT_SCHEMA, "list_sum", {"l", nullptr}, "list_aggr(l, 'sum')"},
-	{DEFAULT_SCHEMA, "list_string_agg", {"l", nullptr}, "list_aggr(l, 'string_agg')"},
+    {DEFAULT_SCHEMA, "round_even",
+     "(x, n) AS CASE ((abs(x) * power(10, n+1)) % 10) WHEN 5 THEN round(x/2, n) * 2 ELSE round(x, n) END"},
+    {DEFAULT_SCHEMA, "roundbankers", "(x, n) AS round_even(x, n)"},
+    {DEFAULT_SCHEMA, "nullif", "(a, b) AS CASE WHEN a=b THEN NULL ELSE a END"},
+    {DEFAULT_SCHEMA, "list_append", "(l, e) AS list_concat(l, list_value(e))"},
+    {DEFAULT_SCHEMA, "array_append", "(arr, el) AS list_append(arr, el)"},
+    {DEFAULT_SCHEMA, "list_prepend", "(e, l) AS list_concat(list_value(e), l)"},
+    {DEFAULT_SCHEMA, "array_prepend", "(el, arr) AS list_prepend(el, arr)"},
+    {DEFAULT_SCHEMA, "array_pop_back", "(arr) AS arr[:LEN(arr)-1]"},
+    {DEFAULT_SCHEMA, "array_pop_front", "(arr) AS arr[2:]"},
+    {DEFAULT_SCHEMA, "array_push_back", "(arr, e) AS list_concat(arr, list_value(e))"},
+    {DEFAULT_SCHEMA, "array_push_front", "(arr, e) AS list_concat(list_value(e), arr)"},
+    {DEFAULT_SCHEMA, "array_to_string",
+     "(arr, sep) AS case len(arr::varchar[]) when 0 then '' else list_aggr(arr::varchar[], 'string_agg', sep) end"},
+    // Test default parameters
+    {DEFAULT_SCHEMA, "array_to_string_comma_default",
+     "(arr, sep := ',') AS case len(arr::varchar[]) when 0 then '' else list_aggr(arr::varchar[], 'string_agg', sep) "
+     "end"},
 
-	// holistic list aggregates
-	{DEFAULT_SCHEMA, "list_mode", {"l", nullptr}, "list_aggr(l, 'mode')"},
-	{DEFAULT_SCHEMA, "list_median", {"l", nullptr}, "list_aggr(l, 'median')"},
-	{DEFAULT_SCHEMA, "list_mad", {"l", nullptr}, "list_aggr(l, 'mad')"},
+    {DEFAULT_SCHEMA, "generate_subscripts", "(arr, dim) AS unnest(generate_series(1, array_length(arr, dim)))"},
+    {DEFAULT_SCHEMA, "fdiv", "(x, y) AS floor(x/y)"},
+    {DEFAULT_SCHEMA, "fmod", "(x, y) AS (x-y*floor(x/y))"},
+    {DEFAULT_SCHEMA, "split_part",
+     "(string, delimiter, \"position\") AS if(string IS NOT NULL AND delimiter IS NOT NULL AND position IS NOT NULL, "
+     "coalesce(string_split(string, delimiter)[position],''), NULL)"},
+    {DEFAULT_SCHEMA, "geomean", "(x) AS exp(avg(ln(x)))"},
+    {DEFAULT_SCHEMA, "geometric_mean", "(x) AS geomean(x)"},
 
-	// nested list aggregates
-	{DEFAULT_SCHEMA, "list_histogram", {"l", nullptr}, "list_aggr(l, 'histogram')"},
+    {DEFAULT_SCHEMA, "weighted_avg",
+     "(value, weight) AS SUM(value * weight) / SUM(CASE WHEN value IS NOT NULL THEN weight ELSE 0 END)"},
+    {DEFAULT_SCHEMA, "wavg", "(value, weight) AS weighted_avg(value, weight)"},
 
-	{nullptr, nullptr, {nullptr}, nullptr}
-	};
+    {DEFAULT_SCHEMA, "list_reverse", "(l) AS l[:-:-1]"},
+    {DEFAULT_SCHEMA, "array_reverse", "(l) AS list_reverse(l)"},
 
-unique_ptr<CreateMacroInfo> DefaultFunctionGenerator::CreateInternalTableMacroInfo(DefaultMacro &default_macro, unique_ptr<MacroFunction> function) {
-	for (idx_t param_idx = 0; default_macro.parameters[param_idx] != nullptr; param_idx++) {
-		function->parameters.push_back(
-		    make_unique<ColumnRefExpression>(default_macro.parameters[param_idx]));
+    // algebraic list aggregates
+    {DEFAULT_SCHEMA, "list_avg", "(l) AS list_aggr(l, 'avg')"},
+    {DEFAULT_SCHEMA, "list_var_samp", "(l) AS list_aggr(l, 'var_samp')"},
+    {DEFAULT_SCHEMA, "list_var_pop", "(l) AS list_aggr(l, 'var_pop')"},
+    {DEFAULT_SCHEMA, "list_stddev_pop", "(l) AS list_aggr(l, 'stddev_pop')"},
+    {DEFAULT_SCHEMA, "list_stddev_samp", "(l) AS list_aggr(l, 'stddev_samp')"},
+    {DEFAULT_SCHEMA, "list_sem", "(l) AS list_aggr(l, 'sem')"},
+
+    // distributive list aggregates
+    {DEFAULT_SCHEMA, "list_approx_count_distinct", "(l) AS list_aggr(l, 'approx_count_distinct')"},
+    {DEFAULT_SCHEMA, "list_bit_xor", "(l) AS list_aggr(l, 'bit_xor')"},
+    {DEFAULT_SCHEMA, "list_bit_or", "(l) AS list_aggr(l, 'bit_or')"},
+    {DEFAULT_SCHEMA, "list_bit_and", "(l) AS list_aggr(l, 'bit_and')"},
+    {DEFAULT_SCHEMA, "list_bool_and", "(l) AS list_aggr(l, 'bool_and')"},
+    {DEFAULT_SCHEMA, "list_bool_or", "(l) AS list_aggr(l, 'bool_or')"},
+    {DEFAULT_SCHEMA, "list_count", "(l) AS list_aggr(l, 'count')"},
+    {DEFAULT_SCHEMA, "list_entropy", "(l) AS list_aggr(l, 'entropy')"},
+    {DEFAULT_SCHEMA, "list_last", "(l) AS list_aggr(l, 'last')"},
+    {DEFAULT_SCHEMA, "list_first", "(l) AS list_aggr(l, 'first')"},
+    {DEFAULT_SCHEMA, "list_any_value", "(l) AS list_aggr(l, 'any_value')"},
+    {DEFAULT_SCHEMA, "list_kurtosis", "(l) AS list_aggr(l, 'kurtosis')"},
+    {DEFAULT_SCHEMA, "list_kurtosis_pop", "(l) AS list_aggr(l, 'kurtosis_pop')"},
+    {DEFAULT_SCHEMA, "list_min", "(l) AS list_aggr(l, 'min')"},
+    {DEFAULT_SCHEMA, "list_max", "(l) AS list_aggr(l, 'max')"},
+    {DEFAULT_SCHEMA, "list_product", "(l) AS list_aggr(l, 'product')"},
+    {DEFAULT_SCHEMA, "list_skewness", "(l) AS list_aggr(l, 'skewness')"},
+    {DEFAULT_SCHEMA, "list_sum", "(l) AS list_aggr(l, 'sum')"},
+    {DEFAULT_SCHEMA, "list_string_agg", "(l) AS list_aggr(l, 'string_agg')"},
+
+    // holistic list aggregates
+    {DEFAULT_SCHEMA, "list_mode", "(l) AS list_aggr(l, 'mode')"},
+    {DEFAULT_SCHEMA, "list_median", "(l) AS list_aggr(l, 'median')"},
+    {DEFAULT_SCHEMA, "list_mad", "(l) AS list_aggr(l, 'mad')"},
+
+    // nested list aggregates
+    {DEFAULT_SCHEMA, "list_histogram", "(l) AS list_aggr(l, 'histogram')"},
+
+    // map functions
+    {DEFAULT_SCHEMA, "map_contains_entry",
+     "(map, key, value) AS contains(map_entries(map), {'key': key, 'value': value})"},
+    {DEFAULT_SCHEMA, "map_contains_value", "(map, value) AS contains(map_values(map), value)"},
+
+    // date functions
+    {DEFAULT_SCHEMA, "date_add", "(date, \"interval\") AS date + interval"},
+
+    // date functions - convenience macro for getting days in month
+    {DEFAULT_SCHEMA, "days_in_month", "(date) AS day(last_day(date))"},
+
+    // timestamptz functions
+    {DEFAULT_SCHEMA, "ago", "(i) AS current_timestamp - i::interval"},
+
+    // regexp functions
+    {DEFAULT_SCHEMA, "regexp_split_to_table", "(text, pattern) AS unnest(string_split_regex(text, pattern))"},
+
+    // storage helper functions
+    {DEFAULT_SCHEMA, "get_block_size",
+     "(db_name) AS (SELECT block_size FROM pragma_database_size() WHERE database_name = db_name)"},
+
+    // string functions
+    {DEFAULT_SCHEMA, "md5_number_upper", "(param) AS ((md5_number(param)::bit::varchar)[65:])::bit::uint64"},
+    {DEFAULT_SCHEMA, "md5_number_lower", "(param) AS ((md5_number(param)::bit::varchar)[:64])::bit::uint64"},
+
+    {nullptr, nullptr, nullptr}};
+
+unique_ptr<CreateMacroInfo> DefaultFunctionGenerator::CreateInternalMacroInfo(const DefaultMacro &default_macro) {
+	return CreateInternalMacroInfo(default_macro, ParserOptions());
+}
+
+unique_ptr<CreateMacroInfo> DefaultFunctionGenerator::CreateInternalMacroInfo(const DefaultMacro &default_macro,
+                                                                              ParserOptions options) {
+	auto bind_info = make_uniq<CreateMacroInfo>(CatalogType::MACRO_ENTRY);
+	// Build a full CREATE MACRO statement and let the parser handle parameters, types, and defaults.
+	// macro_definition may contain multiple comma-separated overloads, e.g. "(x) AS x, (x, y) AS x+y".
+	auto sql = StringUtil::Format("CREATE MACRO __dummy__%s", default_macro.macro_definition);
+	Parser parser(options);
+	parser.ParseQuery(sql);
+	D_ASSERT(parser.statements.size() == 1);
+	D_ASSERT(parser.statements[0]->type == StatementType::CREATE_STATEMENT);
+	auto &create_stmt = parser.statements[0]->Cast<CreateStatement>();
+	D_ASSERT(create_stmt.info->type == CatalogType::MACRO_ENTRY);
+	auto &macro_info = create_stmt.info->Cast<CreateMacroInfo>();
+	// Default-bind any typed parameters (e.g. DATE, TIMESTAMP) so overload resolution works correctly.
+	// TryDefaultBind resolves built-in types without requiring a ClientContext.
+	for (auto &macro : macro_info.macros) {
+		for (auto &type : macro->types) {
+			if (type.IsUnbound()) {
+				type = UnboundType::TryDefaultBind(type);
+			}
+		}
 	}
-
-	auto bind_info = make_unique<CreateMacroInfo>();
-	bind_info->schema = default_macro.schema;
-	bind_info->name = default_macro.name;
+	bind_info->macros = std::move(macro_info.macros);
+	bind_info->schema = Identifier(default_macro.schema);
+	bind_info->name = Identifier(default_macro.name);
 	bind_info->temporary = true;
 	bind_info->internal = true;
-	bind_info->type = function->type == MacroType::TABLE_MACRO ? CatalogType::TABLE_MACRO_ENTRY : CatalogType::MACRO_ENTRY;
-	bind_info->function = move(function);
 	return bind_info;
-
 }
 
-unique_ptr<CreateMacroInfo> DefaultFunctionGenerator::CreateInternalMacroInfo(DefaultMacro &default_macro) {
-	// parse the expression
-	auto expressions = Parser::ParseExpressionList(default_macro.macro);
-	D_ASSERT(expressions.size() == 1);
-
-	auto result = make_unique<ScalarMacroFunction>(move(expressions[0]));
-	return CreateInternalTableMacroInfo(default_macro, move(result));
+static bool DefaultFunctionMatches(const DefaultMacro &macro, const Identifier &schema, const Identifier &name) {
+	return macro.schema == schema && macro.name == name;
 }
 
-unique_ptr<CreateMacroInfo> DefaultFunctionGenerator::CreateInternalTableMacroInfo(DefaultMacro &default_macro) {
-	Parser parser;
-	parser.ParseQuery(default_macro.macro);
-	D_ASSERT(parser.statements.size() == 1);
-	D_ASSERT(parser.statements[0]->type == StatementType::SELECT_STATEMENT);
-
-	auto &select = (SelectStatement &) *parser.statements[0];
-	auto result = make_unique<TableMacroFunction>(move(select.node));
-	return CreateInternalTableMacroInfo(default_macro, move(result));
-}
-
-static unique_ptr<CreateFunctionInfo> GetDefaultFunction(const string &input_schema, const string &input_name) {
-	auto schema = StringUtil::Lower(input_schema);
-	auto name = StringUtil::Lower(input_name);
+static unique_ptr<CreateFunctionInfo> GetDefaultFunction(const Identifier &input_schema, const Identifier &input_name,
+                                                         ParserOptions options) {
+	auto &schema = input_schema;
+	auto &name = input_name;
 	for (idx_t index = 0; internal_macros[index].name != nullptr; index++) {
-		if (internal_macros[index].schema == schema && internal_macros[index].name == name) {
-			return DefaultFunctionGenerator::CreateInternalMacroInfo(internal_macros[index]);
+		if (DefaultFunctionMatches(internal_macros[index], schema, name)) {
+			return DefaultFunctionGenerator::CreateInternalMacroInfo(internal_macros[index], options);
 		}
 	}
 	return nullptr;
 }
 
-DefaultFunctionGenerator::DefaultFunctionGenerator(Catalog &catalog, SchemaCatalogEntry *schema)
+DefaultFunctionGenerator::DefaultFunctionGenerator(Catalog &catalog, SchemaCatalogEntry &schema)
     : DefaultGenerator(catalog), schema(schema) {
 }
 
 unique_ptr<CatalogEntry> DefaultFunctionGenerator::CreateDefaultEntry(ClientContext &context,
-                                                                      const string &entry_name) {
-	auto info = GetDefaultFunction(schema->name, entry_name);
+                                                                      const Identifier &entry_name) {
+	ParserOptions options;
+	options.parser_cache = &context.db->GetParserCache();
+	auto info = GetDefaultFunction(schema.name, entry_name, options);
 	if (info) {
-		return make_unique_base<CatalogEntry, ScalarMacroCatalogEntry>(&catalog, schema, (CreateMacroInfo *)info.get());
+		return make_uniq_base<CatalogEntry, ScalarMacroCatalogEntry>(catalog, schema, info->Cast<CreateMacroInfo>());
 	}
 	return nullptr;
 }
 
-vector<string> DefaultFunctionGenerator::GetDefaultEntries() {
-	vector<string> result;
+vector<Identifier> DefaultFunctionGenerator::GetDefaultEntries() {
+	vector<Identifier> result;
 	for (idx_t index = 0; internal_macros[index].name != nullptr; index++) {
-		if (internal_macros[index].schema == schema->name) {
+		if (StringUtil::Lower(internal_macros[index].name) != internal_macros[index].name) {
+			throw InternalException("Default macro name %s should be lowercase", internal_macros[index].name);
+		}
+		if (internal_macros[index].schema == schema.name) {
 			result.emplace_back(internal_macros[index].name);
 		}
 	}

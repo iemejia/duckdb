@@ -13,30 +13,35 @@
 namespace duckdb {
 
 class LogicalSetOperation : public LogicalOperator {
-	LogicalSetOperation(idx_t table_index, idx_t column_count, LogicalOperatorType type)
-	    : LogicalOperator(type), table_index(table_index), column_count(column_count) {
-	}
+	LogicalSetOperation(TableIndex table_index, idx_t column_count, LogicalOperatorType type, bool setop_all,
+	                    bool allow_out_of_order);
 
 public:
-	LogicalSetOperation(idx_t table_index, idx_t column_count, unique_ptr<LogicalOperator> top,
-	                    unique_ptr<LogicalOperator> bottom, LogicalOperatorType type)
-	    : LogicalOperator(type), table_index(table_index), column_count(column_count) {
-		D_ASSERT(type == LogicalOperatorType::LOGICAL_UNION || type == LogicalOperatorType::LOGICAL_EXCEPT ||
-		         type == LogicalOperatorType::LOGICAL_INTERSECT);
-		children.push_back(move(top));
-		children.push_back(move(bottom));
-	}
+	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_INVALID;
 
-	idx_t table_index;
+public:
+	LogicalSetOperation(TableIndex table_index, idx_t column_count, unique_ptr<LogicalOperator> top,
+	                    unique_ptr<LogicalOperator> bottom, LogicalOperatorType type, bool setop_all,
+	                    bool allow_out_of_order = true);
+	LogicalSetOperation(TableIndex table_index, idx_t column_count, vector<unique_ptr<LogicalOperator>> children,
+	                    LogicalOperatorType type, bool setop_all, bool allow_out_of_order = true);
+
+	TableIndex table_index;
 	idx_t column_count;
+	bool setop_all;
+	//! Whether or not UNION statements can be executed out of order
+	bool allow_out_of_order;
 
 public:
 	vector<ColumnBinding> GetColumnBindings() override {
 		return GenerateColumnBindings(table_index, column_count);
 	}
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
+
+	vector<TableIndex> GetTableIndex() const override;
+	string GetName() const override;
 
 protected:
 	void ResolveTypes() override {

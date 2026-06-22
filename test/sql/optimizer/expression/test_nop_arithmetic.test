@@ -3,9 +3,6 @@
 # group: [expression]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE test (a INTEGER, b INTEGER)
 
 statement ok
@@ -75,21 +72,21 @@ SELECT a / 1 FROM test
 
 # 1 / a
 query I
-SELECT 1 / a FROM test
+SELECT 1 // a FROM test
 ----
 0
 0
 
 # a / 0 => NULL
 query I
-SELECT a / 0 FROM test
+SELECT a // 0 FROM test
 ----
 NULL
 NULL
 
 # 0 / a => 0
 query I
-SELECT 0 / a FROM test
+SELECT 0 // a FROM test
 ----
 0
 0
@@ -117,6 +114,9 @@ SELECT 0 / a FROM test
 ----
 NULL
 NULL
+
+statement ok
+SET ieee_floating_point_ops=false;
 
 query I
 SELECT 0 / rowid FROM test

@@ -10,19 +10,20 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/bound_result_modifier.hpp"
 
 namespace duckdb {
 
 class PhysicalStreamingLimit : public PhysicalOperator {
 public:
-	PhysicalStreamingLimit(vector<LogicalType> types, idx_t limit, idx_t offset,
-	                       unique_ptr<Expression> limit_expression, unique_ptr<Expression> offset_expression,
-	                       idx_t estimated_cardinality, bool parallel);
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::STREAMING_LIMIT;
 
-	idx_t limit_value;
-	idx_t offset_value;
-	unique_ptr<Expression> limit_expression;
-	unique_ptr<Expression> offset_expression;
+public:
+	PhysicalStreamingLimit(PhysicalPlan &physical_plan, vector<LogicalType> types, BoundLimitNode limit_val_p,
+	                       BoundLimitNode offset_val_p, idx_t estimated_cardinality, bool parallel);
+
+	BoundLimitNode limit_val;
+	BoundLimitNode offset_val;
 	bool parallel;
 
 public:
@@ -32,8 +33,10 @@ public:
 	OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                           GlobalOperatorState &gstate, OperatorState &state) const override;
 
-	bool IsOrderDependent() const override;
+	OrderPreservationType OperatorOrder() const override;
 	bool ParallelOperator() const override;
+
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 };
 
 } // namespace duckdb

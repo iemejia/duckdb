@@ -1,6 +1,9 @@
 #include "capi_tester.hpp"
 
 bool NO_FAIL(duckdb::CAPIResult &result) {
+	if (result.HasError()) {
+		fprintf(stderr, "Query failed with message: %s\n", result.ErrorMessage());
+	}
 	return result.success;
 }
 
@@ -83,8 +86,32 @@ duckdb_time CAPIResult::Fetch(idx_t col, idx_t row) {
 }
 
 template <>
+duckdb_time_ns CAPIResult::Fetch(idx_t col, idx_t row) {
+	auto data = (duckdb_time_ns *)duckdb_column_data(&result, col);
+	return data[row];
+}
+
+template <>
 duckdb_timestamp CAPIResult::Fetch(idx_t col, idx_t row) {
 	auto data = (duckdb_timestamp *)duckdb_column_data(&result, col);
+	return data[row];
+}
+
+template <>
+duckdb_timestamp_s CAPIResult::Fetch(idx_t col, idx_t row) {
+	auto data = (duckdb_timestamp_s *)duckdb_column_data(&result, col);
+	return data[row];
+}
+
+template <>
+duckdb_timestamp_ms CAPIResult::Fetch(idx_t col, idx_t row) {
+	auto data = (duckdb_timestamp_ms *)duckdb_column_data(&result, col);
+	return data[row];
+}
+
+template <>
+duckdb_timestamp_ns CAPIResult::Fetch(idx_t col, idx_t row) {
+	auto data = (duckdb_timestamp_ns *)duckdb_column_data(&result, col);
 	return data[row];
 }
 
@@ -128,6 +155,11 @@ duckdb_timestamp_struct CAPIResult::Fetch(idx_t col, idx_t row) {
 template <>
 duckdb_hugeint CAPIResult::Fetch(idx_t col, idx_t row) {
 	return duckdb_value_hugeint(&result, col, row);
+}
+
+template <>
+duckdb_uhugeint CAPIResult::Fetch(idx_t col, idx_t row) {
+	return duckdb_value_uhugeint(&result, col, row);
 }
 
 } // namespace duckdb

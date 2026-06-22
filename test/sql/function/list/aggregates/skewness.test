@@ -5,6 +5,7 @@
 # incorrect usage
 statement error
 select list_skewness()
+----
 
 query I
 select list_skewness([1])
@@ -14,15 +15,31 @@ NULL
 statement ok
 CREATE TABLE skew AS SELECT LIST(10) AS i FROM range(5) t1(i)
 
-# constant value
+# constant value (zero variance → NULL, since skewness is mathematically undefined)
 query I
 select list_skewness (i) from skew
+----
+NULL
+
+query I
+select list_skewness([5, 5, 5])
+----
+NULL
+
+query I
+select list_skewness([1.5, 1.5, 1.5])
+----
+NULL
+
+query I
+select list_skewness ([1,2])
 ----
 NULL
 
 # out of range
 statement error
 select list_skewness([-2e307, 0, 2e307])
+----
 
 statement ok
 create table aggr(k int[], v decimal(10,2)[], v2 decimal(10, 2)[]);

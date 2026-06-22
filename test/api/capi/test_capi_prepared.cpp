@@ -1,11 +1,13 @@
 #include "capi_tester.hpp"
+#include <atomic>
+#include <random>
+#include <thread>
 
 using namespace duckdb;
-using namespace std;
 
 TEST_CASE("Test prepared statements in C API", "[capi]") {
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 	duckdb_result res;
 	duckdb_prepared_statement stmt = nullptr;
 	duckdb_state status;
@@ -17,9 +19,18 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	REQUIRE(status == DuckDBSuccess);
 	REQUIRE(stmt != nullptr);
 
-	status = duckdb_bind_boolean(stmt, 1, 1);
+	REQUIRE(duckdb_prepared_statement_column_count(stmt) == 1);
+	REQUIRE(duckdb_prepared_statement_column_type(stmt, 0) == DUCKDB_TYPE_BIGINT);
+	auto logical_type = duckdb_prepared_statement_column_logical_type(stmt, 0);
+	REQUIRE(logical_type);
+	REQUIRE(duckdb_get_type_id(logical_type) == DUCKDB_TYPE_BIGINT);
+	duckdb_destroy_logical_type(&logical_type);
+
+	status = duckdb_bind_boolean(stmt, 1, true);
 	REQUIRE(status == DuckDBSuccess);
-	status = duckdb_bind_boolean(stmt, 2, 1);
+
+	// Parameter index 2 is out of bounds
+	status = duckdb_bind_boolean(stmt, 2, true);
 	REQUIRE(status == DuckDBError);
 
 	status = duckdb_execute_prepared(stmt, &res);
@@ -55,6 +66,12 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	status = duckdb_execute_prepared(stmt, &res);
 	REQUIRE(status == DuckDBSuccess);
 	REQUIRE(duckdb_hugeint_to_double(duckdb_value_hugeint(&res, 0, 0)) == 64.0);
+	duckdb_destroy_result(&res);
+
+	duckdb_bind_uhugeint(stmt, 1, duckdb_double_to_uhugeint(64));
+	status = duckdb_execute_prepared(stmt, &res);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(duckdb_uhugeint_to_double(duckdb_value_uhugeint(&res, 0, 0)) == 64.0);
 	duckdb_destroy_result(&res);
 
 	// Fetching a DECIMAL from a non-DECIMAL result returns 0
@@ -198,6 +215,14 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	duckdb_free(value);
 	duckdb_destroy_result(&res);
 
+	duckdb_bind_timestamp_tz(stmt, 1, duckdb_to_timestamp(ts));
+	status = duckdb_execute_prepared(stmt, &res);
+	REQUIRE(status == DuckDBSuccess);
+	value = duckdb_value_varchar(&res, 0, 0);
+	REQUIRE(StringUtil::Contains(string(value), "1992-09"));
+	duckdb_free(value);
+	duckdb_destroy_result(&res);
+
 	duckdb_interval interval;
 	interval.months = 3;
 	interval.days = 0;
@@ -258,6 +283,9 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	REQUIRE(status == DuckDBSuccess);
 	REQUIRE(stmt != nullptr);
 
+	REQUIRE(duckdb_prepared_statement_column_count(stmt) == 1);
+	REQUIRE(duckdb_prepared_statement_column_type(stmt, 0) == DUCKDB_TYPE_INTEGER);
+
 	status = duckdb_execute_prepared(stmt, &res);
 	REQUIRE(status == DuckDBError);
 	duckdb_destroy_result(&res);
@@ -276,5 +304,462 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	REQUIRE(duckdb_param_type(nullptr, 0) == DUCKDB_TYPE_INVALID);
 	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_INTEGER);
 
+	REQUIRE(duckdb_prepared_statement_column_count(stmt) == 1);
+	REQUIRE(duckdb_prepared_statement_column_type(stmt, 0) == DUCKDB_TYPE_HUGEINT);
+
 	duckdb_destroy_prepare(&stmt);
+}
+
+TEST_CASE("Test duckdb_prepared_statement return value APIs", "[capi]") {
+	duckdb_database db;
+	duckdb_connection conn;
+	duckdb_prepared_statement stmt;
+	REQUIRE(duckdb_open("", &db) == DuckDBSuccess);
+	REQUIRE(duckdb_connect(db, &conn) == DuckDBSuccess);
+
+	// Unambiguous return column types
+	REQUIRE(duckdb_prepare(conn, "select $1::TEXT, $2::integer, $3::BOOLEAN, $4::FLOAT, $5::DOUBLE", &stmt) ==
+	        DuckDBSuccess);
+
+	REQUIRE(duckdb_prepared_statement_column_count(stmt) == 5);
+	auto expected_types = {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_INTEGER, DUCKDB_TYPE_BOOLEAN, DUCKDB_TYPE_FLOAT,
+	                       DUCKDB_TYPE_DOUBLE};
+
+	for (idx_t i = 0; i < 5; i++) {
+		REQUIRE(duckdb_prepared_statement_column_type(stmt, i) == *std::next(expected_types.begin(), i));
+		auto logical_type = duckdb_prepared_statement_column_logical_type(stmt, i);
+		REQUIRE(logical_type);
+		REQUIRE(duckdb_get_type_id(logical_type) == *std::next(expected_types.begin(), i));
+		duckdb_destroy_logical_type(&logical_type);
+	}
+
+	auto column_name = duckdb_prepared_statement_column_name(stmt, 0);
+	std::string col_name_str = column_name;
+	duckdb_free((void *)column_name);
+	REQUIRE(col_name_str == "CAST($1 AS TEXT)");
+
+	duckdb_destroy_prepare(&stmt);
+
+	// Return columns contain ambiguous types
+	REQUIRE(duckdb_prepare(conn, "select $1::TEXT, $2::integer, $3, $4::BOOLEAN, $5::FLOAT, $6::DOUBLE", &stmt) ==
+	        DuckDBSuccess);
+
+	REQUIRE(duckdb_prepared_statement_column_count(stmt) == 1);
+	REQUIRE(duckdb_prepared_statement_column_type(stmt, 0) == DUCKDB_TYPE_INVALID);
+
+	auto logical_type = duckdb_prepared_statement_column_logical_type(stmt, 0);
+	REQUIRE(logical_type);
+	REQUIRE(duckdb_get_type_id(logical_type) == DUCKDB_TYPE_INVALID);
+	duckdb_destroy_logical_type(&logical_type);
+
+	auto col_name_ptr = duckdb_prepared_statement_column_name(stmt, 0);
+	col_name_str = col_name_ptr;
+	duckdb_free((void *)col_name_ptr);
+	REQUIRE(col_name_str == "unknown");
+	REQUIRE(duckdb_prepared_statement_column_name(stmt, 1) == nullptr);
+	REQUIRE(duckdb_prepared_statement_column_name(stmt, 5) == nullptr);
+
+	duckdb_destroy_prepare(&stmt);
+	duckdb_disconnect(&conn);
+	duckdb_close(&db);
+}
+
+TEST_CASE("Test duckdb_param_type and duckdb_param_logical_type", "[capi]") {
+	duckdb_database db;
+	duckdb_connection conn;
+	duckdb_prepared_statement stmt;
+
+	REQUIRE(duckdb_open("", &db) == DuckDBSuccess);
+	REQUIRE(duckdb_connect(db, &conn) == DuckDBSuccess);
+	REQUIRE(duckdb_prepare(conn, "select $1::integer, $2::integer", &stmt) == DuckDBSuccess);
+
+	auto logical_type = duckdb_param_logical_type(stmt, 2);
+	REQUIRE(logical_type);
+	REQUIRE(duckdb_get_type_id(logical_type) == DUCKDB_TYPE_INTEGER);
+	duckdb_destroy_logical_type(&logical_type);
+
+	REQUIRE(duckdb_param_type(stmt, 2) == DUCKDB_TYPE_INTEGER);
+	REQUIRE(duckdb_bind_null(stmt, 1) == DuckDBSuccess);
+	REQUIRE(duckdb_bind_int32(stmt, 2, 10) == DuckDBSuccess);
+
+	REQUIRE(!duckdb_param_logical_type(nullptr, 2));
+	REQUIRE(duckdb_param_type(nullptr, 2) == DUCKDB_TYPE_INVALID);
+	REQUIRE(!duckdb_param_logical_type(stmt, 2000));
+	REQUIRE(duckdb_param_type(stmt, 2000) == DUCKDB_TYPE_INVALID);
+
+	duckdb_result result;
+	REQUIRE(duckdb_execute_prepared(stmt, &result) == DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 2) == DUCKDB_TYPE_INTEGER);
+	duckdb_clear_bindings(stmt);
+	duckdb_destroy_result(&result);
+
+	duckdb_destroy_prepare(&stmt);
+	duckdb_disconnect(&conn);
+	duckdb_close(&db);
+}
+
+TEST_CASE("Test duckdb_param_type with nested casts", "[capi]") {
+	duckdb_database db;
+	duckdb_connection conn;
+	duckdb_prepared_statement stmt;
+
+	REQUIRE(duckdb_open("", &db) == DuckDBSuccess);
+	REQUIRE(duckdb_connect(db, &conn) == DuckDBSuccess);
+
+	// Single cast: parameter type is the inner cast target.
+	REQUIRE(duckdb_prepare(conn, "SELECT CAST($1 AS INTEGER)", &stmt) == DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_INTEGER);
+	duckdb_destroy_prepare(&stmt);
+
+	// Nested cast: parameter type should still be the innermost cast target.
+	REQUIRE(duckdb_prepare(conn, "SELECT CAST(CAST($1 AS INTEGER) AS VARCHAR)", &stmt) == DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_INTEGER);
+	duckdb_destroy_prepare(&stmt);
+
+	REQUIRE(duckdb_prepare(conn, "SELECT CAST(CAST($1 AS TIMESTAMPTZ) AS VARCHAR)", &stmt) == DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_TIMESTAMP_TZ);
+	duckdb_destroy_prepare(&stmt);
+
+	// Triple-nested cast: still pinned by the innermost target.
+	REQUIRE(duckdb_prepare(conn, "SELECT CAST(CAST(CAST($1 AS INTEGER) AS BIGINT) AS VARCHAR)", &stmt) ==
+	        DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_INTEGER);
+	duckdb_destroy_prepare(&stmt);
+
+	// Multiple independent casts on the same parameter remain ambiguous and invalidate.
+	REQUIRE(duckdb_prepare(conn, "SELECT $1::INTEGER + $1::BIGINT", &stmt) == DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_INVALID);
+	duckdb_destroy_prepare(&stmt);
+
+	duckdb_disconnect(&conn);
+	duckdb_close(&db);
+}
+
+TEST_CASE("Test prepared statements with named parameters in C API", "[capi]") {
+	CAPITester tester;
+	duckdb::unique_ptr<CAPIResult> result;
+	duckdb_result res;
+	duckdb_prepared_statement stmt = nullptr;
+	duckdb_state status;
+
+	// open the database in in-memory mode
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	status = duckdb_prepare(tester.connection, "SELECT CAST($my_val AS BIGINT)", &stmt);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(stmt != nullptr);
+
+	idx_t parameter_index;
+	// test invalid name
+	status = duckdb_bind_parameter_index(stmt, &parameter_index, "invalid");
+	REQUIRE(status == DuckDBError);
+
+	status = duckdb_bind_parameter_index(stmt, &parameter_index, "my_val");
+	REQUIRE(status == DuckDBSuccess);
+
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_BIGINT);
+
+	auto logical_type = duckdb_param_logical_type(stmt, 1);
+	REQUIRE(logical_type);
+	REQUIRE(duckdb_get_type_id(logical_type) == DUCKDB_TYPE_BIGINT);
+	duckdb_destroy_logical_type(&logical_type);
+
+	idx_t param_count = duckdb_nparams(stmt);
+	duckdb::vector<string> names;
+	for (idx_t i = 0; i < param_count; i++) {
+		auto name = duckdb_parameter_name(stmt, i + 1);
+		names.push_back(std::string(name));
+		duckdb_free((void *)name);
+	}
+
+	REQUIRE(duckdb_parameter_name(stmt, 0) == (const char *)NULL);
+	REQUIRE(duckdb_parameter_name(stmt, 2) == (const char *)NULL);
+
+	REQUIRE(duckdb_prepared_statement_column_count(stmt) == 1);
+	REQUIRE(duckdb_prepared_statement_column_type(stmt, 0) == DUCKDB_TYPE_BIGINT);
+
+	duckdb::vector<string> expected_names = {"my_val"};
+	REQUIRE(names.size() == expected_names.size());
+	for (idx_t i = 0; i < expected_names.size(); i++) {
+		auto &name = names[i];
+		auto &expected_name = expected_names[i];
+		REQUIRE(name == expected_name);
+	}
+
+	status = duckdb_bind_boolean(stmt, parameter_index, 1);
+	REQUIRE(status == DuckDBSuccess);
+	status = duckdb_bind_boolean(stmt, parameter_index + 1, 1);
+	REQUIRE(status == DuckDBError);
+
+	status = duckdb_execute_prepared(stmt, &res);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(duckdb_value_int64(&res, 0, 0) == 1);
+	duckdb_destroy_result(&res);
+
+	// Clear the bindings, don't rebind the parameter index
+	status = duckdb_clear_bindings(stmt);
+	REQUIRE(status == DuckDBSuccess);
+
+	status = duckdb_bind_boolean(stmt, parameter_index, 1);
+	REQUIRE(status == DuckDBSuccess);
+
+	status = duckdb_execute_prepared(stmt, &res);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(duckdb_value_int64(&res, 0, 0) == 1);
+	duckdb_destroy_result(&res);
+
+	duckdb_destroy_prepare(&stmt);
+}
+
+TEST_CASE("Maintain prepared statement types", "[capi]") {
+	CAPITester tester;
+	duckdb::unique_ptr<CAPIResult> result;
+	duckdb_result res;
+	duckdb_prepared_statement stmt = nullptr;
+	duckdb_state status;
+
+	// open the database in in-memory mode
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	status = duckdb_prepare(tester.connection, "select cast(111 as short) * $1", &stmt);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(stmt != nullptr);
+
+	status = duckdb_bind_int64(stmt, 1, 1665);
+	REQUIRE(status == DuckDBSuccess);
+
+	status = duckdb_execute_prepared(stmt, &res);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(duckdb_value_int64(&res, 0, 0) == 184815);
+	duckdb_destroy_result(&res);
+	duckdb_destroy_prepare(&stmt);
+}
+
+TEST_CASE("Test duckdb_parameter_name", "[capi]") {
+	CAPITester tester;
+	duckdb_prepared_statement stmt;
+
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	SECTION("Contiguous positional parameters") {
+		REQUIRE(duckdb_prepare(tester.connection, "SELECT $1, $2, $3", &stmt) == DuckDBSuccess);
+		REQUIRE(duckdb_nparams(stmt) == 3);
+
+		const char *name;
+		name = duckdb_parameter_name(stmt, 1);
+		REQUIRE(string(name) == "1");
+		duckdb_free((void *)name);
+
+		name = duckdb_parameter_name(stmt, 2);
+		REQUIRE(string(name) == "2");
+		duckdb_free((void *)name);
+
+		name = duckdb_parameter_name(stmt, 3);
+		REQUIRE(string(name) == "3");
+		duckdb_free((void *)name);
+
+		REQUIRE(duckdb_parameter_name(stmt, 4) == nullptr);
+
+		duckdb_destroy_prepare(&stmt);
+	}
+
+	SECTION("Uncontiguous parameters") {
+		REQUIRE(duckdb_prepare(tester.connection, "SELECT $1, $10", &stmt) == DuckDBSuccess);
+
+		REQUIRE(duckdb_nparams(stmt) == 2);
+
+		const char *name;
+		name = duckdb_parameter_name(stmt, 1);
+		REQUIRE(string(name) == "1");
+		duckdb_free((void *)name);
+
+		name = duckdb_parameter_name(stmt, 10);
+		REQUIRE(string(name) == "10");
+		duckdb_free((void *)name);
+
+		// Non-existing indexes
+		REQUIRE(duckdb_parameter_name(stmt, 2) == nullptr);
+		REQUIRE(duckdb_parameter_name(stmt, 11) == nullptr);
+
+		duckdb_destroy_prepare(&stmt);
+	}
+
+	SECTION("Named parameters") {
+		REQUIRE(duckdb_prepare(tester.connection, "SELECT $foo, $bar", &stmt) == DuckDBSuccess);
+		REQUIRE(duckdb_nparams(stmt) == 2);
+
+		const char *name;
+		// Named parameters are starting from 1
+		name = duckdb_parameter_name(stmt, 1);
+		REQUIRE(string(name) == "foo");
+		duckdb_free((void *)name);
+
+		name = duckdb_parameter_name(stmt, 2);
+		REQUIRE(string(name) == "bar");
+		duckdb_free((void *)name);
+
+		duckdb_destroy_prepare(&stmt);
+	}
+}
+
+TEST_CASE("Prepared streaming result", "[capi]") {
+	CAPITester tester;
+
+	// open the database in in-memory mode
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	SECTION("non streaming result") {
+		REQUIRE(tester.Query("CREATE TABLE t2 (i INTEGER, j INTEGER);"));
+
+		duckdb_prepared_statement stmt;
+		REQUIRE(duckdb_prepare(tester.connection,
+		                       "INSERT INTO t2  SELECT 2 AS i, 3 AS j  RETURNING *, i * j AS i_times_j",
+		                       &stmt) == DuckDBSuccess);
+		duckdb_result res;
+		REQUIRE(duckdb_execute_prepared_streaming(stmt, &res) == DuckDBSuccess);
+		REQUIRE(!duckdb_result_is_streaming(res));
+		duckdb_destroy_result(&res);
+		duckdb_destroy_prepare(&stmt);
+	}
+
+	SECTION("streaming result") {
+		duckdb_prepared_statement stmt;
+		REQUIRE(duckdb_prepare(tester.connection, "FROM RANGE(0, 10)", &stmt) == DuckDBSuccess);
+
+		duckdb_result res;
+		REQUIRE(duckdb_execute_prepared_streaming(stmt, &res) == DuckDBSuccess);
+		REQUIRE(duckdb_result_is_streaming(res));
+
+		duckdb_data_chunk chunk;
+		idx_t index = 0;
+		while (true) {
+			chunk = duckdb_stream_fetch_chunk(res);
+			if (!chunk) {
+				break;
+			}
+			auto chunk_size = duckdb_data_chunk_get_size(chunk);
+			REQUIRE(chunk_size > 0);
+
+			auto vec = duckdb_data_chunk_get_vector(chunk, 0);
+			auto column_type = duckdb_vector_get_column_type(vec);
+			REQUIRE(duckdb_get_type_id(column_type) == DUCKDB_TYPE_BIGINT);
+			duckdb_destroy_logical_type(&column_type);
+
+			auto data = reinterpret_cast<int64_t *>(duckdb_vector_get_data(vec));
+			for (idx_t i = 0; i < chunk_size; i++) {
+				REQUIRE(data[i] == int64_t(index + i));
+			}
+			index += chunk_size;
+			duckdb_destroy_data_chunk(&chunk);
+		}
+
+		REQUIRE(duckdb_stream_fetch_chunk(res) == nullptr);
+
+		duckdb_destroy_result(&res);
+		duckdb_destroy_prepare(&stmt);
+	}
+
+	SECTION("streaming extracted statements") {
+		duckdb_extracted_statements stmts;
+		auto n_statements = duckdb_extract_statements(tester.connection, "Select 1; Select 2;", &stmts);
+		REQUIRE(n_statements == 2);
+
+		for (idx_t i = 0; i < n_statements; i++) {
+			duckdb_prepared_statement stmt;
+			REQUIRE(duckdb_prepare_extracted_statement(tester.connection, stmts, i, &stmt) == DuckDBSuccess);
+
+			duckdb_result res;
+			REQUIRE(duckdb_execute_prepared_streaming(stmt, &res) == DuckDBSuccess);
+			REQUIRE(duckdb_result_is_streaming(res));
+
+			duckdb_data_chunk chunk;
+			chunk = duckdb_stream_fetch_chunk(res);
+			REQUIRE(chunk != nullptr);
+			REQUIRE(duckdb_data_chunk_get_size(chunk) == 1);
+
+			auto vec = duckdb_data_chunk_get_vector(chunk, 0);
+
+			auto type = duckdb_vector_get_column_type(vec);
+			REQUIRE(duckdb_get_type_id(type) == DUCKDB_TYPE_INTEGER);
+			duckdb_destroy_logical_type(&type);
+
+			auto data = (int32_t *)duckdb_vector_get_data(vec);
+			REQUIRE(data[0] == (int32_t)(i + 1));
+
+			REQUIRE(duckdb_stream_fetch_chunk(res) == nullptr);
+
+			duckdb_destroy_data_chunk(&chunk);
+			duckdb_destroy_result(&res);
+			duckdb_destroy_prepare(&stmt);
+		}
+
+		duckdb_destroy_extracted(&stmts);
+	}
+}
+
+TEST_CASE("Test STRING LITERAL parameter type", "[capi]") {
+	duckdb_database db;
+	duckdb_connection conn;
+	duckdb_prepared_statement stmt;
+
+	REQUIRE(duckdb_open("", &db) == DuckDBSuccess);
+	REQUIRE(duckdb_connect(db, &conn) == DuckDBSuccess);
+
+	REQUIRE(duckdb_prepare(conn, "SELECT ?", &stmt) == DuckDBSuccess);
+	REQUIRE(duckdb_bind_varchar(stmt, 1, "a") == DuckDBSuccess);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_STRING_LITERAL);
+	duckdb_destroy_prepare(&stmt);
+
+	duckdb_disconnect(&conn);
+	duckdb_close(&db);
+}
+
+TEST_CASE("Test concurrent prepared statement execution race condition MRE", "[capi]") {
+	// This test is a minimal reproducible example for the race condition described in #7187 (internal).
+	duckdb_database db;
+	REQUIRE(duckdb_open(nullptr, &db) == DuckDBSuccess);
+
+	duckdb_connection conn;
+	REQUIRE(duckdb_connect(db, &conn) == DuckDBSuccess);
+
+	std::atomic<idx_t> failures {0};
+	std::atomic<idx_t> completed {0};
+
+	constexpr idx_t NUM_THREADS = 4;
+	constexpr idx_t ITERATIONS = 1000;
+
+	duckdb::vector<std::thread> threads;
+	for (idx_t t = 0; t < NUM_THREADS; t++) {
+		threads.emplace_back([&]() {
+			for (idx_t i = 0; i < ITERATIONS; i++) {
+				duckdb_prepared_statement stmt = nullptr;
+				if (duckdb_prepare(conn, "SELECT 1", &stmt) != DuckDBSuccess) {
+					++failures;
+					continue;
+				}
+
+				duckdb_result result;
+				if (duckdb_execute_prepared(stmt, &result) != DuckDBSuccess) {
+					++failures;
+					duckdb_destroy_prepare(&stmt);
+					continue;
+				}
+
+				duckdb_destroy_result(&result);
+				duckdb_destroy_prepare(&stmt);
+				++completed;
+			}
+		});
+	}
+
+	for (auto &t : threads) {
+		t.join();
+	}
+
+	// All executions should succeed
+	REQUIRE(failures == 0);
+	REQUIRE(completed == NUM_THREADS * ITERATIONS);
+
+	duckdb_disconnect(&conn);
+	duckdb_close(&db);
 }

@@ -8,6 +8,9 @@
 #ifndef FMT_CORE_H_
 #define FMT_CORE_H_
 
+#include "duckdb/common/hugeint.hpp"
+#include "duckdb/common/uhugeint.hpp"
+
 #include <cstdio>  // std::FILE
 #include <cstring>
 #include <iterator>
@@ -62,15 +65,9 @@
 
 // Check if relaxed C++14 constexpr is supported.
 // GCC doesn't allow throw in constexpr until version 6 (bug 67371).
-#ifndef FMT_USE_CONSTEXPR
-#  define FMT_USE_CONSTEXPR                                           \
-    (FMT_HAS_FEATURE(cxx_relaxed_constexpr) || FMT_MSC_VER >= 1910 || \
-     (FMT_GCC_VERSION >= 600 && __cplusplus >= 201402L)) &&           \
-        !FMT_NVCC
-#endif
 #if FMT_USE_CONSTEXPR
-#  define FMT_CONSTEXPR constexpr
-#  define FMT_CONSTEXPR_DECL constexpr
+#  define FMT_CONSTEXPR inline
+#  define FMT_CONSTEXPR_DECL
 #else
 #  define FMT_CONSTEXPR inline
 #  define FMT_CONSTEXPR_DECL
@@ -229,26 +226,25 @@ template <typename... Ts> struct void_t_impl { using type = void; };
 #endif
 
 #if defined(FMT_USE_STRING_VIEW)
-template <typename Char> using std_string_view = std::basic_string_view<Char>;
-#elif defined(FMT_USE_EXPERIMENTAL_STRING_VIEW)
+// Undefine to avoid deprecation warnings from libc++ for non-standard char types
+#undef FMT_USE_STRING_VIEW
+#endif
+#if defined(FMT_USE_EXPERIMENTAL_STRING_VIEW)
 template <typename Char>
 using std_string_view = std::experimental::basic_string_view<Char>;
 #else
 template <typename T> struct std_string_view {};
 #endif
 
+using int128_t = duckdb::hugeint_t;
+using uint128_t = duckdb::uhugeint_t;
+
 #ifdef FMT_USE_INT128
 // Do nothing.
 #elif defined(__SIZEOF_INT128__)
 #  define FMT_USE_INT128 1
-using int128_t = __int128_t;
-using uint128_t = __uint128_t;
 #else
 #  define FMT_USE_INT128 0
-#endif
-#if !FMT_USE_INT128
-struct int128_t {};
-struct uint128_t {};
 #endif
 
 // Casts a nonnegative integer to unsigned.
@@ -323,6 +319,10 @@ template <typename Char> class basic_string_view {
     size_ -= n;
   }
 
+  std::string to_string() {
+	  return std::string((char *) data(), size());
+  }
+
   // Lexicographically compare this string reference to other.
   int compare(basic_string_view other) const {
     size_t str_size = size_ < other.size_ ? size_ : other.size_;
@@ -355,16 +355,12 @@ template <typename Char> class basic_string_view {
 using string_view = basic_string_view<char>;
 using wstring_view = basic_string_view<wchar_t>;
 
-#ifndef __cpp_char8_t
-// A UTF-8 code unit type.
-enum char8_t : unsigned char {};
-#endif
+typedef char fmt_char8_t;
 
 /** Specifies if ``T`` is a character type. Can be specialized by users. */
 template <typename T> struct is_char : std::false_type {};
-template <> struct is_char<char> : std::true_type {};
 template <> struct is_char<wchar_t> : std::true_type {};
-template <> struct is_char<char8_t> : std::true_type {};
+template <> struct is_char<fmt_char8_t> : std::true_type {};
 template <> struct is_char<char16_t> : std::true_type {};
 template <> struct is_char<char32_t> : std::true_type {};
 
@@ -415,7 +411,7 @@ template <typename S>
 struct is_compile_string : std::is_base_of<compile_string, S> {};
 
 template <typename S, FMT_ENABLE_IF(is_compile_string<S>::value)>
-constexpr basic_string_view<typename S::char_type> to_string_view(const S& s) {
+FMT_CONSTEXPR basic_string_view<typename S::char_type> to_string_view(const S& s) {
   return s;
 }
 
@@ -441,7 +437,7 @@ struct error_handler {
   FMT_CONSTEXPR error_handler(const error_handler&) = default;
 
   // This function is intentionally not constexpr to give a compile-time error.
-  FMT_NORETURN FMT_API void on_error(const char* message);
+  FMT_NORETURN FMT_API void on_error(std::string message);
 };
 }  // namespace internal
 
@@ -519,7 +515,7 @@ class basic_format_parse_context : private ErrorHandler {
 
   FMT_CONSTEXPR void check_arg_id(basic_string_view<Char>) {}
 
-  FMT_CONSTEXPR void on_error(const char* message) {
+  FMT_CONSTEXPR void on_error(std::string message) {
     ErrorHandler::on_error(message);
   }
 
@@ -1010,16 +1006,10 @@ FMT_CONSTEXPR auto visit_format_arg(Visitor&& vis,
     return vis(arg.value_.long_long_value);
   case internal::ulong_long_type:
     return vis(arg.value_.ulong_long_value);
-#if FMT_USE_INT128
   case internal::int128_type:
     return vis(arg.value_.int128_value);
   case internal::uint128_type:
     return vis(arg.value_.uint128_value);
-#else
-  case internal::int128_type:
-  case internal::uint128_type:
-    break;
-#endif
   case internal::bool_type:
     return vis(arg.value_.bool_value);
   case internal::char_type:
@@ -1157,7 +1147,7 @@ template <typename OutputIt, typename Char> class basic_format_context {
   format_arg arg(basic_string_view<char_type> name);
 
   internal::error_handler error_handler() { return {}; }
-  void on_error(const char* message) { error_handler().on_error(message); }
+  void on_error(std::string message) { error_handler().on_error(message); }
 
   // Returns an iterator to the beginning of the output range.
   iterator out() { return out_; }

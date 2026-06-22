@@ -1,190 +1,179 @@
 #include "duckdb/execution/operator/schema/physical_create_index.hpp"
 
-#include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/common/exception/transaction_exception.hpp"
+#include "duckdb/execution/index/bound_index.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/storage/table/append_state.hpp"
+#include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 
 namespace duckdb {
 
-//===--------------------------------------------------------------------===//
-// Sink
-//===--------------------------------------------------------------------===//
+PhysicalCreateIndex::PhysicalCreateIndex(PhysicalPlan &physical_plan, LogicalOperator &op, TableCatalogEntry &table_p,
+                                         const vector<column_t> &column_ids, unique_ptr<CreateIndexInfo> info,
+                                         vector<unique_ptr<Expression>> unbound_expressions_p,
+                                         idx_t estimated_cardinality, IndexType index_type,
+                                         unique_ptr<IndexBuildBindData> bind_data,
+                                         unique_ptr<AlterTableInfo> alter_table_info)
 
-class CreateIndexGlobalSinkState : public GlobalSinkState {
-public:
-	//! Global index to be added to the table
-	unique_ptr<Index> global_index;
-};
-
-class CreateIndexLocalSinkState : public LocalSinkState {
-public:
-	explicit CreateIndexLocalSinkState(const vector<unique_ptr<Expression>> &expressions) : executor(expressions) {
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::CREATE_INDEX, op.types, estimated_cardinality),
+      table(table_p.Cast<DuckTableEntry>()), info(std::move(info)),
+      unbound_expressions(std::move(unbound_expressions_p)), index_type(std::move(index_type)),
+      bind_data(std::move(bind_data)), alter_table_info(std::move(alter_table_info)) {
+	// Convert the logical column ids to physical column ids.
+	for (auto &column_id : column_ids) {
+		storage_ids.push_back(table.GetColumns().LogicalToPhysical(LogicalIndex(column_id)).index);
 	}
 
-	//! Local indexes build from chunks of the scanned data
-	unique_ptr<Index> local_index;
+	for (idx_t i = 0; i < unbound_expressions.size(); ++i) {
+		auto &expr = unbound_expressions[i];
+		indexed_column_types.push_back(expr->GetReturnType());
+		indexed_columns.push_back(i);
+	}
 
-	DataChunk key_chunk;
-	unique_ptr<GlobalSortState> global_sort_state;
-	LocalSortState local_sort_state;
+	// Row id is always last
+	rowid_column.push_back(unbound_expressions.size());
+}
 
-	RowLayout payload_layout;
-	vector<LogicalType> payload_types;
-
-	ExpressionExecutor executor;
+//---------------------------------------------------------------------------------------------------------------------
+// Sink
+//---------------------------------------------------------------------------------------------------------------------
+class CreateIndexGlobalSinkState : public GlobalSinkState {
+public:
+	unique_ptr<IndexBuildGlobalState> gstate;
 };
 
 unique_ptr<GlobalSinkState> PhysicalCreateIndex::GetGlobalSinkState(ClientContext &context) const {
+	auto gstate = make_uniq<CreateIndexGlobalSinkState>();
 
-	auto state = make_unique<CreateIndexGlobalSinkState>();
+	IndexBuildInitGlobalStateInput global_state_input {bind_data.get(),     context,    table, *info,
+	                                                   unbound_expressions, storage_ids};
+	gstate->gstate = index_type.build_global_init(global_state_input);
 
-	// create the global index
-	switch (info->index_type) {
-	case IndexType::ART: {
-		state->global_index = make_unique<ART>(storage_ids, TableIOManager::Get(*table.storage), unbound_expressions,
-		                                       info->constraint_type, *context.db);
-		break;
-	}
-	default:
-		throw InternalException("Unimplemented index type");
-	}
-
-	return (move(state));
+	return std::move(gstate);
 }
+
+class CreateIndexLocalSinkState : public LocalSinkState {
+public:
+	unique_ptr<IndexBuildLocalState> lstate;
+	DataChunk key_chunk;
+	DataChunk row_chunk;
+};
 
 unique_ptr<LocalSinkState> PhysicalCreateIndex::GetLocalSinkState(ExecutionContext &context) const {
-	auto &allocator = Allocator::Get(table.storage->db);
+	auto lstate = make_uniq<CreateIndexLocalSinkState>();
 
-	auto state = make_unique<CreateIndexLocalSinkState>(expressions);
+	IndexBuildInitLocalStateInput local_state_input {bind_data.get(), context.client,      table,
+	                                                 *info,           unbound_expressions, storage_ids};
+	lstate->lstate = index_type.build_local_init(local_state_input);
 
-	// create the local index
-	switch (info->index_type) {
-	case IndexType::ART: {
-		state->local_index = make_unique<ART>(storage_ids, TableIOManager::Get(*table.storage), unbound_expressions,
-		                                      info->constraint_type, *context.client.db);
-		break;
-	}
-	default:
-		throw InternalException("Unimplemented index type");
-	}
+	lstate->key_chunk.InitializeEmpty(indexed_column_types);
+	lstate->row_chunk.InitializeEmpty({LogicalType::ROW_TYPE});
 
-	state->key_chunk.Initialize(allocator, state->local_index->logical_types);
-
-	// ordering of the entries of the index
-	vector<BoundOrderByNode> orders;
-	for (idx_t i = 0; i < state->local_index->logical_types.size(); i++) {
-		auto col_expr = make_unique_base<Expression, BoundReferenceExpression>(state->local_index->logical_types[i], i);
-		orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_FIRST, move(col_expr));
-	}
-
-	// row layout of the global sort state
-	state->payload_types = state->local_index->logical_types;
-	state->payload_types.emplace_back(LogicalType::ROW_TYPE);
-	state->payload_layout.Initialize(state->payload_types);
-
-	// initialize global and local sort state
-	auto &buffer_manager = BufferManager::GetBufferManager(table.storage->db);
-	state->global_sort_state = make_unique<GlobalSortState>(buffer_manager, orders, state->payload_layout);
-	state->local_sort_state.Initialize(*state->global_sort_state, buffer_manager);
-
-	return move(state);
+	return std::move(lstate);
 }
 
-SinkResultType PhysicalCreateIndex::Sink(ExecutionContext &context, GlobalSinkState &gstate_p, LocalSinkState &lstate_p,
-                                         DataChunk &input) const {
+SinkResultType PhysicalCreateIndex::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
+	auto &gstate = input.global_state.Cast<CreateIndexGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<CreateIndexLocalSinkState>();
 
-	// here, we sink all incoming data into the local_sink_state after executing the expression executor
-	auto &lstate = (CreateIndexLocalSinkState &)lstate_p;
+	// FIXME: use unified format instead of Flatten
+	chunk.Flatten();
 
-	// resolve the expressions for this chunk
-	D_ASSERT(!lstate.executor.HasContext());
-	lstate.key_chunk.Reset();
-	lstate.executor.Execute(input, lstate.key_chunk);
+	// Reference the key columns and rowid column
+	lstate.key_chunk.ReferenceColumns(chunk, indexed_columns);
+	lstate.row_chunk.ReferenceColumns(chunk, rowid_column);
 
-	// create the payload chunk
-	DataChunk payload_chunk;
-	payload_chunk.InitializeEmpty(lstate.payload_types);
-	for (idx_t i = 0; i < lstate.local_index->logical_types.size(); i++) {
-		payload_chunk.data[i].Reference(lstate.key_chunk.data[i]);
+	// Check for NULLs, if we are creating a PRIMARY KEY.
+	// FIXME: Later, we want to ensure that we skip the NULL check for any non-PK alter.
+	if (alter_table_info) {
+		for (idx_t i = 0; i < lstate.key_chunk.ColumnCount(); i++) {
+			if (VectorOperations::HasNull(lstate.key_chunk.data[i])) {
+				throw ConstraintException("NOT NULL constraint failed: %s", info->index_name);
+			}
+		}
 	}
-	payload_chunk.data[lstate.payload_types.size() - 1].Reference(input.data[input.ColumnCount() - 1]);
-	payload_chunk.SetCardinality(input.size());
 
-	// sink the chunks into the local sort state
-	lstate.local_sort_state.SinkChunk(lstate.key_chunk, payload_chunk);
+	// Sink into the index
+	IndexBuildSinkInput sink_input {bind_data.get(), *gstate.gstate, *lstate.lstate, table, *info};
+	index_type.build_sink(sink_input, lstate.key_chunk, lstate.row_chunk);
 
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-void PhysicalCreateIndex::Combine(ExecutionContext &context, GlobalSinkState &gstate_p,
-                                  LocalSinkState &lstate_p) const {
+SinkCombineResultType PhysicalCreateIndex::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {
+	auto &gstate = input.global_state.Cast<CreateIndexGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<CreateIndexLocalSinkState>();
 
-	// here, we take the sunk data chunks and sort them
-	// then, we scan the sorted data and build a local index from it
-	// finally, we merge the local index into the global index
+	IndexBuildCombineInput combine_input {bind_data.get(), *gstate.gstate, *lstate.lstate, table, *info};
+	index_type.build_combine(combine_input);
 
-	auto &gstate = (CreateIndexGlobalSinkState &)gstate_p;
-	auto &lstate = (CreateIndexLocalSinkState &)lstate_p;
-
-	auto &allocator = Allocator::Get(table.storage->db);
-
-	// add local state to global state, which sorts the data
-	lstate.global_sort_state->AddLocalState(lstate.local_sort_state);
-	lstate.global_sort_state->PrepareMergePhase();
-
-	// scan the sorted row data and construct the index from it
-	{
-		IndexLock local_lock;
-		lstate.local_index->InitializeLock(local_lock);
-		if (!lstate.global_sort_state->sorted_blocks.empty()) {
-			PayloadScanner scanner(*lstate.global_sort_state->sorted_blocks[0]->payload_data,
-			                       *lstate.global_sort_state);
-			lstate.local_index->ConstructAndMerge(local_lock, scanner, allocator);
-		}
-	}
-
-	// merge the local index into the global index
-	gstate.global_index->MergeIndexes(lstate.local_index.get());
+	return SinkCombineResultType::FINISHED;
 }
 
 SinkFinalizeType PhysicalCreateIndex::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
-                                               GlobalSinkState &gstate_p) const {
+                                               OperatorSinkFinalizeInput &input) const {
+	auto &gstate = input.global_state.Cast<CreateIndexGlobalSinkState>();
 
-	// here, we just set the resulting global index as the newly created index of the table
+	// Finalize the index
+	IndexBuildFinalizeInput finalize_input {*gstate.gstate};
+	auto bound_index = index_type.build_finalize(finalize_input);
 
-	auto &state = (CreateIndexGlobalSinkState &)gstate_p;
+	// Vacuum excess memory and verify.
+	bound_index->Vacuum();
 
-	if (!table.storage->IsRoot()) {
-		throw TransactionException("Transaction conflict: cannot add an index to a table that has been altered!");
+	bound_index->Verify();
+
+	D_ASSERT(!bound_index->ToString(true).empty());
+
+	bound_index->VerifyAllocations();
+
+	auto &storage = table.GetStorage();
+	if (!storage.IsMainTable()) {
+		throw TransactionException(
+		    "Transaction conflict: cannot add an index to a table that has been altered or dropped");
 	}
 
-	auto &schema = *table.schema;
-	auto index_entry = (IndexCatalogEntry *)schema.CreateIndex(context, info.get(), &table);
-	if (!index_entry) {
-		// index already exists, but error ignored because of IF NOT EXISTS
-		return SinkFinalizeType::READY;
+	auto &schema = table.schema;
+	info->column_ids = storage_ids;
+
+	if (!alter_table_info) {
+		// Ensure that the index does not yet exist in the catalog.
+		auto entry = schema.GetEntry(schema.GetCatalogTransaction(context), CatalogType::INDEX_ENTRY, info->index_name);
+		if (entry) {
+			if (info->on_conflict != OnCreateConflict::IGNORE_ON_CONFLICT) {
+				throw CatalogException("Index with name \"%s\" already exists!", info->index_name);
+			}
+			// IF NOT EXISTS on existing index. We are done.
+			return SinkFinalizeType::READY;
+		}
+
+		auto index_entry = schema.CreateIndex(schema.GetCatalogTransaction(context), *info, table).get();
+		D_ASSERT(index_entry);
+		auto &index = index_entry->Cast<DuckIndexEntry>();
+		index.initial_index_size = bound_index->GetInMemorySize();
+
+	} else {
+		// Ensure that there are no other indexes with that name on this table.
+		auto &indexes = storage.GetDataTableInfo()->GetIndexes();
+		for (auto &index : indexes.Indexes()) {
+			if (index.GetIndexName() == info->index_name) {
+				throw CatalogException("an index with that name already exists for this table: %s", info->index_name);
+			}
+		}
+
+		auto &catalog = Catalog::GetCatalog(context, info->catalog);
+		catalog.Alter(context, *alter_table_info);
 	}
 
-	index_entry->index = state.global_index.get();
-	index_entry->info = table.storage->info;
-	for (auto &parsed_expr : info->parsed_expressions) {
-		index_entry->parsed_expressions.push_back(parsed_expr->Copy());
-	}
+	// Add the index to the storage.
+	storage.AddIndex(std::move(bound_index));
 
-	table.storage->info->indexes.AddIndex(move(state.global_index));
 	return SinkFinalizeType::READY;
-}
-
-//===--------------------------------------------------------------------===//
-// Source
-//===--------------------------------------------------------------------===//
-
-void PhysicalCreateIndex::GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-                                  LocalSourceState &lstate) const {
-	// NOP
 }
 
 } // namespace duckdb

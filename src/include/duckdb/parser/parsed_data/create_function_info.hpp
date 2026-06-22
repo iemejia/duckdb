@@ -9,24 +9,34 @@
 #pragma once
 
 #include "duckdb/parser/parsed_data/create_info.hpp"
-#include "duckdb/function/function.hpp"
 
+#include "duckdb/common/identifier.hpp"
 namespace duckdb {
 
+struct FunctionDescription {
+	//! Parameter types (if any)
+	vector<LogicalType> parameter_types;
+	//! Parameter names (if any)
+	vector<string> parameter_names;
+	//! The description (if any)
+	string description;
+	//! Examples (if any)
+	vector<string> examples;
+	//! Categories (if any)
+	vector<string> categories;
+};
+
 struct CreateFunctionInfo : public CreateInfo {
-	explicit CreateFunctionInfo(CatalogType type, string schema = DEFAULT_SCHEMA) : CreateInfo(type, schema) {
-		D_ASSERT(type == CatalogType::SCALAR_FUNCTION_ENTRY || type == CatalogType::AGGREGATE_FUNCTION_ENTRY ||
-		         type == CatalogType::TABLE_FUNCTION_ENTRY || type == CatalogType::PRAGMA_FUNCTION_ENTRY ||
-		         type == CatalogType::MACRO_ENTRY || type == CatalogType::TABLE_MACRO_ENTRY);
-	}
+	explicit CreateFunctionInfo(CatalogType type, Identifier schema = Identifier::DefaultSchema());
 
 	//! Function name
-	string name;
+	Identifier name;
+	//! The function name of which this function is an alias
+	Identifier alias_of;
+	//! Function description
+	vector<FunctionDescription> descriptions;
 
-protected:
-	void SerializeInternal(Serializer &serializer) const override {
-		serializer.WriteString(name);
-	}
+	DUCKDB_API void CopyFunctionProperties(CreateFunctionInfo &other) const;
 };
 
 } // namespace duckdb

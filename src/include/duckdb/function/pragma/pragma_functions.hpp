@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/function/pragma_function.hpp"
+#include "duckdb/function/built_in_functions.hpp"
 
 namespace duckdb {
 
@@ -20,6 +21,10 @@ struct PragmaFunctions {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 
-string PragmaShow(ClientContext &context, const FunctionParameters &parameters);
+string PragmaShowTables(const string &catalog = "", const string &schema = "");
+string PragmaShowTablesExpanded();
+string PragmaShowDatabases();
+string PragmaShowVariables();
+string PragmaShow(const string &table_name);
 
 } // namespace duckdb

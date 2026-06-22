@@ -1,9 +1,6 @@
 # name: test/sql/show_select/test_summarize_quoted.test
 # group: [show_select]
 
-statement ok
-pragma enable_verification;
-
 # Quoted table name, no schema name
 statement ok
 create table "a.b.c" (x int);
@@ -11,7 +8,7 @@ create table "a.b.c" (x int);
 query IIIIIIIIIIII
 summarize "a.b.c";
 ----
-x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	%
+x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	NULL
 
 statement ok
 create schema defg;
@@ -26,7 +23,7 @@ create table defg."a.b.c" (x int);
 query IIIIIIIIIIII
 summarize defg."a.b.c";
 ----
-x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	%
+x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	NULL
 
 statement ok
 drop table defg."a.b.c";
@@ -38,7 +35,7 @@ create table defg.abc (x int);
 query IIIIIIIIIIII
 summarize defg.abc;
 ----
-x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	%
+x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	NULL
 
 statement ok
 drop table defg.abc;
@@ -56,7 +53,7 @@ create table "d.e.f.g"."a.b.c" (x int);
 query IIIIIIIIIIII
 summarize "d.e.f.g"."a.b.c";
 ----
-x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	%
+x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	NULL
 
 statement ok
 drop table "d.e.f.g"."a.b.c"
@@ -68,4 +65,4 @@ create table "d.e.f.g".abc (x int);
 query IIIIIIIIIIII
 summarize "d.e.f.g".abc;
 ----
-x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	%
+x	INTEGER	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	0	NULL

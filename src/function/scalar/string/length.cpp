@@ -1,43 +1,28 @@
-#include "duckdb/function/scalar/string_functions.hpp"
-
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/bit.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
+#include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/storage/statistics/string_statistics.hpp"
 #include "duckdb/planner/expression/bound_parameter_expression.hpp"
 #include "utf8proc.hpp"
 
 namespace duckdb {
 
+namespace {
+
 // length returns the number of unicode codepoints
 struct StringLengthOperator {
 	template <class TA, class TR>
 	static inline TR Operation(TA input) {
-		return LengthFun::Length<TA, TR>(input);
+		return Length<TA, TR>(input);
 	}
 };
 
 struct GraphemeCountOperator {
 	template <class TA, class TR>
 	static inline TR Operation(TA input) {
-		return LengthFun::GraphemeCount<TA, TR>(input);
-	}
-};
-
-struct ArrayLengthOperator {
-	template <class TA, class TR>
-	static inline TR Operation(TA input) {
-		return input.length;
-	}
-};
-
-struct ArrayLengthBinaryOperator {
-	template <class TA, class TB, class TR>
-	static inline TR Operation(TA input, TB dimension) {
-		if (dimension != 1) {
-			throw NotImplementedException("array_length for dimensions other than 1 not implemented");
-		}
-		return input.length;
+		return GraphemeCount<TA, TR>(input);
 	}
 };
 
@@ -45,7 +30,14 @@ struct ArrayLengthBinaryOperator {
 struct StrLenOperator {
 	template <class TA, class TR>
 	static inline TR Operation(TA input) {
-		return input.GetSize();
+		return UnsafeNumericCast<TR>(input.GetSize());
+	}
+};
+
+struct OctetLenOperator {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		return UnsafeNumericCast<TR>(Bit::OctetLength(input));
 	}
 };
 
@@ -53,86 +45,222 @@ struct StrLenOperator {
 struct BitLenOperator {
 	template <class TA, class TR>
 	static inline TR Operation(TA input) {
-		return 8 * input.GetSize();
+		return UnsafeNumericCast<TR>(8 * input.GetSize());
 	}
 };
 
-static unique_ptr<BaseStatistics> LengthPropagateStats(ClientContext &context, FunctionStatisticsInput &input) {
+// bitstringlen returns the amount of bits in a bitstring
+struct BitStringLenOperator {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		return UnsafeNumericCast<TR>(Bit::BitLength(input));
+	}
+};
+
+unique_ptr<BaseStatistics> LengthPropagateStats(ClientContext &context, FunctionStatisticsInput &input) {
 	auto &child_stats = input.child_stats;
 	auto &expr = input.expr;
 	D_ASSERT(child_stats.size() == 1);
 	// can only propagate stats if the children have stats
-	if (!child_stats[0]) {
-		return nullptr;
-	}
-	auto &sstats = (StringStatistics &)*child_stats[0];
-	if (!sstats.has_unicode) {
-		expr.function.function = ScalarFunction::UnaryFunction<string_t, int64_t, StrLenOperator>;
+	if (!StringStats::CanContainUnicode(child_stats[0])) {
+		expr.FunctionMutable().SetFunctionCallback(ScalarFunction::UnaryFunction<string_t, int64_t, StrLenOperator>);
 	}
 	return nullptr;
 }
 
-static unique_ptr<FunctionData> ListLengthBind(ClientContext &context, ScalarFunction &bound_function,
-                                               vector<unique_ptr<Expression>> &arguments) {
-	if (arguments[0]->HasParameter()) {
+//------------------------------------------------------------------
+// ARRAY / LIST LENGTH
+//------------------------------------------------------------------
+void ListLengthFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	const auto &input = args.data[0];
+	D_ASSERT(input.GetType().id() == LogicalTypeId::LIST);
+	UnaryExecutor::Execute<list_entry_t, int64_t>(
+	    input, result, [](list_entry_t input) { return UnsafeNumericCast<int64_t>(input.length); });
+}
+
+void ArrayLengthFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	const auto &input = args.data[0];
+	auto array_size = static_cast<int64_t>(ArrayType::GetSize(input.GetType()));
+	auto validity_entries = input.Validity();
+
+	if (!validity_entries.CanHaveNull()) {
+		// for arrays the length is constant
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+		ConstantVector::GetData<int64_t>(result)[0] = array_size;
+		FlatVector::SetSize(result, args.size());
+		return;
+	}
+	// we need to inherit the null values of the parent
+	auto result_data = FlatVector::Writer<int64_t>(result, args.size());
+	for (idx_t r = 0; r < args.size(); r++) {
+		if (!validity_entries.IsValid(r)) {
+			result_data.WriteNull();
+		} else {
+			result_data.WriteValue(array_size);
+		}
+	}
+}
+
+unique_ptr<FunctionData> ArrayOrListLengthBind(BindScalarFunctionInput &input) {
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+	if (arguments[0]->HasParameter() || arguments[0]->GetReturnType().id() == LogicalTypeId::UNKNOWN) {
 		throw ParameterNotResolvedException();
 	}
-	bound_function.arguments[0] = arguments[0]->return_type;
+
+	const auto &arg_type = arguments[0]->GetReturnType().id();
+	if (arg_type == LogicalTypeId::ARRAY) {
+		bound_function.SetFunctionCallback(ArrayLengthFunction);
+	} else if (arg_type == LogicalTypeId::LIST) {
+		bound_function.SetFunctionCallback(ListLengthFunction);
+	} else {
+		// Unreachable
+		throw BinderException("length can only be used on arrays or lists");
+	}
+	bound_function.GetArguments()[0] = arguments[0]->GetReturnType();
 	return nullptr;
 }
 
-void LengthFun::RegisterFunction(BuiltinFunctions &set) {
-	ScalarFunction array_length_unary =
-	    ScalarFunction({LogicalType::LIST(LogicalType::ANY)}, LogicalType::BIGINT,
-	                   ScalarFunction::UnaryFunction<list_entry_t, int64_t, ArrayLengthOperator>, ListLengthBind);
-	ScalarFunctionSet length("length");
-	length.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BIGINT,
-	                                  ScalarFunction::UnaryFunction<string_t, int64_t, StringLengthOperator>, nullptr,
-	                                  nullptr, LengthPropagateStats));
-	length.AddFunction(array_length_unary);
-	set.AddFunction(length);
-	length.name = "len";
-	set.AddFunction(length);
-
-	ScalarFunctionSet length_grapheme("length_grapheme");
-	length_grapheme.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BIGINT,
-	                                           ScalarFunction::UnaryFunction<string_t, int64_t, GraphemeCountOperator>,
-	                                           nullptr, nullptr, LengthPropagateStats));
-	set.AddFunction(length_grapheme);
-
-	ScalarFunctionSet array_length("array_length");
-	array_length.AddFunction(array_length_unary);
-	array_length.AddFunction(ScalarFunction(
-	    {LogicalType::LIST(LogicalType::ANY), LogicalType::BIGINT}, LogicalType::BIGINT,
-	    ScalarFunction::BinaryFunction<list_entry_t, int64_t, int64_t, ArrayLengthBinaryOperator>, ListLengthBind));
-	set.AddFunction(array_length);
-
-	set.AddFunction(ScalarFunction("strlen", {LogicalType::VARCHAR}, LogicalType::BIGINT,
-	                               ScalarFunction::UnaryFunction<string_t, int64_t, StrLenOperator>));
-	set.AddFunction(ScalarFunction("bit_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
-	                               ScalarFunction::UnaryFunction<string_t, int64_t, BitLenOperator>));
-	// length for BLOB type
-	set.AddFunction(ScalarFunction("octet_length", {LogicalType::BLOB}, LogicalType::BIGINT,
-	                               ScalarFunction::UnaryFunction<string_t, int64_t, StrLenOperator>));
+//------------------------------------------------------------------
+// ARRAY / LIST WITH DIMENSION
+//------------------------------------------------------------------
+void ListLengthBinaryFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	auto type = args.data[0].GetType();
+	const auto &input = args.data[0];
+	const auto &dimension = args.data[1];
+	BinaryExecutor::Execute<list_entry_t, int64_t, int64_t>(
+	    input, dimension, result, [](list_entry_t input, int64_t dimension) {
+		    if (dimension != 1) {
+			    throw NotImplementedException("array_length for lists with dimensions other than 1 not implemented");
+		    }
+		    return UnsafeNumericCast<int64_t>(input.length);
+	    });
 }
 
-struct UnicodeOperator {
-	template <class TA, class TR>
-	static inline TR Operation(const TA &input) {
-		auto str = reinterpret_cast<const utf8proc_uint8_t *>(input.GetDataUnsafe());
-		auto len = input.GetSize();
-		utf8proc_int32_t codepoint;
-		(void)utf8proc_iterate(str, len, &codepoint);
-		return codepoint;
+struct ArrayLengthBinaryFunctionData : public FunctionData {
+	vector<int64_t> dimensions;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto copy = make_uniq<ArrayLengthBinaryFunctionData>();
+		copy->dimensions = dimensions;
+		return std::move(copy);
+	}
+
+	bool Equals(const FunctionData &other) const override {
+		auto &other_data = other.Cast<const ArrayLengthBinaryFunctionData>();
+		return dimensions == other_data.dimensions;
 	}
 };
 
-void UnicodeFun::RegisterFunction(BuiltinFunctions &set) {
-	ScalarFunction unicode("unicode", {LogicalType::VARCHAR}, LogicalType::INTEGER,
-	                       ScalarFunction::UnaryFunction<string_t, int32_t, UnicodeOperator>);
-	set.AddFunction(unicode);
-	unicode.name = "ord";
-	set.AddFunction(unicode);
+void ArrayLengthBinaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto type = args.data[0].GetType();
+	const auto &dimension = args.data[1];
+
+	auto &expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &data = expr.BindInfo()->Cast<ArrayLengthBinaryFunctionData>();
+	auto &dimensions = data.dimensions;
+	auto max_dimension = static_cast<int64_t>(dimensions.size());
+
+	UnaryExecutor::Execute<int64_t, int64_t>(dimension, result, [&](int64_t dimension) {
+		if (dimension < 1 || dimension > max_dimension) {
+			throw OutOfRangeException(StringUtil::Format(
+			    "array_length dimension '%lld' out of range (min: '1', max: '%lld')", dimension, max_dimension));
+		}
+		return dimensions[UnsafeNumericCast<idx_t>(dimension - 1)];
+	});
+}
+
+unique_ptr<FunctionData> ArrayOrListLengthBinaryBind(BindScalarFunctionInput &input) {
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+	if (arguments[0]->HasParameter() || arguments[0]->GetReturnType().id() == LogicalTypeId::UNKNOWN) {
+		throw ParameterNotResolvedException();
+	}
+	auto type = arguments[0]->GetReturnType();
+	if (type.id() == LogicalTypeId::ARRAY) {
+		bound_function.GetArguments()[0] = type;
+		bound_function.SetFunctionCallback(ArrayLengthBinaryFunction);
+
+		// If the input is an array, the dimensions are constant, so we can calculate them at bind time
+		vector<int64_t> dimensions;
+		while (true) {
+			if (type.id() == LogicalTypeId::ARRAY) {
+				dimensions.push_back(UnsafeNumericCast<int64_t>(ArrayType::GetSize(type)));
+				type = ArrayType::GetChildType(type);
+			} else {
+				break;
+			}
+		}
+		auto data = make_uniq<ArrayLengthBinaryFunctionData>();
+		data->dimensions = dimensions;
+		return std::move(data);
+
+	} else if (type.id() == LogicalTypeId::LIST) {
+		bound_function.SetFunctionCallback(ListLengthBinaryFunction);
+		bound_function.GetArguments()[0] = type;
+		return nullptr;
+	} else {
+		// Unreachable
+		throw BinderException("array_length can only be used on arrays or lists");
+	}
+}
+
+} // namespace
+
+ScalarFunctionSet LengthFun::GetFunctions() {
+	ScalarFunctionSet length("length");
+	length.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BIGINT,
+	                                  ScalarFunction::UnaryFunction<string_t, int64_t, StringLengthOperator>, nullptr,
+	                                  LengthPropagateStats));
+	length.AddFunction(ScalarFunction({LogicalType::BIT}, LogicalType::BIGINT,
+	                                  ScalarFunction::UnaryFunction<string_t, int64_t, BitStringLenOperator>));
+	length.AddFunction(
+	    ScalarFunction({LogicalType::LIST(LogicalType::ANY)}, LogicalType::BIGINT, nullptr, ArrayOrListLengthBind));
+	return (length);
+}
+
+ScalarFunctionSet LengthGraphemeFun::GetFunctions() {
+	ScalarFunctionSet length_grapheme("length_grapheme");
+	length_grapheme.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BIGINT,
+	                                           ScalarFunction::UnaryFunction<string_t, int64_t, GraphemeCountOperator>,
+	                                           nullptr, LengthPropagateStats));
+	return (length_grapheme);
+}
+
+ScalarFunctionSet ArrayLengthFun::GetFunctions() {
+	ScalarFunctionSet array_length("array_length");
+	array_length.AddFunction(
+	    ScalarFunction({LogicalType::LIST(LogicalType::ANY)}, LogicalType::BIGINT, nullptr, ArrayOrListLengthBind));
+	array_length.AddFunction(ScalarFunction({LogicalType::LIST(LogicalType::ANY), LogicalType::BIGINT},
+	                                        LogicalType::BIGINT, nullptr, ArrayOrListLengthBinaryBind));
+	for (auto &func : array_length.functions) {
+		func.SetFallible();
+	}
+	return (array_length);
+}
+
+ScalarFunction StrlenFun::GetFunction() {
+	return ScalarFunction("strlen", {LogicalType::VARCHAR}, LogicalType::BIGINT,
+	                      ScalarFunction::UnaryFunction<string_t, int64_t, StrLenOperator>);
+}
+
+ScalarFunctionSet BitLengthFun::GetFunctions() {
+	ScalarFunctionSet bit_length("bit_length");
+	bit_length.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BIGINT,
+	                                      ScalarFunction::UnaryFunction<string_t, int64_t, BitLenOperator>));
+	bit_length.AddFunction(ScalarFunction({LogicalType::BIT}, LogicalType::BIGINT,
+	                                      ScalarFunction::UnaryFunction<string_t, int64_t, BitStringLenOperator>));
+	return (bit_length);
+}
+
+ScalarFunctionSet OctetLengthFun::GetFunctions() {
+	// length for BLOB type
+	ScalarFunctionSet octet_length("octet_length");
+	octet_length.AddFunction(ScalarFunction({LogicalType::BLOB}, LogicalType::BIGINT,
+	                                        ScalarFunction::UnaryFunction<string_t, int64_t, StrLenOperator>));
+	octet_length.AddFunction(ScalarFunction({LogicalType::BIT}, LogicalType::BIGINT,
+	                                        ScalarFunction::UnaryFunction<string_t, int64_t, OctetLenOperator>));
+	return (octet_length);
 }
 
 } // namespace duckdb

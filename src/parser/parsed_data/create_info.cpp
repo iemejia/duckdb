@@ -1,61 +1,43 @@
 #include "duckdb/parser/parsed_data/create_info.hpp"
 
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
-#include "duckdb/parser/parsed_data/create_schema_info.hpp"
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
+#include "duckdb/parser/parsed_data/create_macro_info.hpp"
 
 namespace duckdb {
-void CreateInfo::DeserializeBase(Deserializer &deserializer) {
-	this->schema = deserializer.Read<string>();
-	this->on_conflict = deserializer.Read<OnCreateConflict>();
-	this->temporary = deserializer.Read<bool>();
-	this->internal = deserializer.Read<bool>();
-	this->sql = deserializer.Read<string>();
-}
-
-void CreateInfo::Serialize(Serializer &serializer) const {
-	serializer.Write(type);
-	serializer.WriteString(schema);
-	serializer.Write(on_conflict);
-	serializer.Write(temporary);
-	serializer.Write(internal);
-	serializer.WriteString(sql);
-	SerializeInternal(serializer);
-}
-
-unique_ptr<CreateInfo> CreateInfo::Deserialize(Deserializer &deserializer) {
-	auto type = deserializer.Read<CatalogType>();
-	switch (type) {
-	case CatalogType::INDEX_ENTRY:
-		return CreateIndexInfo::Deserialize(deserializer);
-	case CatalogType::TABLE_ENTRY:
-		return CreateTableInfo::Deserialize(deserializer);
-	case CatalogType::SCHEMA_ENTRY:
-		return CreateSchemaInfo::Deserialize(deserializer);
-	case CatalogType::VIEW_ENTRY:
-		return CreateViewInfo::Deserialize(deserializer);
-	default:
-		throw NotImplementedException("Cannot deserialize '%s'", CatalogTypeToString(type));
-	}
-}
-
-unique_ptr<CreateInfo> CreateInfo::Deserialize(Deserializer &source, PlanDeserializationState &state) {
-	return Deserialize(source);
-}
 
 void CreateInfo::CopyProperties(CreateInfo &other) const {
 	other.type = type;
+	other.catalog = catalog;
 	other.schema = schema;
 	other.on_conflict = on_conflict;
 	other.temporary = temporary;
 	other.internal = internal;
+	other.extension_name = extension_name;
 	other.sql = sql;
+	other.dependencies = dependencies;
+	other.comment = comment;
+	other.tags = tags;
 }
 
 unique_ptr<AlterInfo> CreateInfo::GetAlterInfo() const {
 	throw NotImplementedException("GetAlterInfo not implemented for this type");
+}
+
+string CreateInfo::GetCreatePrefix(const string &entry) const {
+	string prefix = "CREATE";
+	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+		prefix += " OR REPLACE";
+	}
+	if (temporary) {
+		prefix += " TEMP";
+	}
+	prefix += " " + entry + " ";
+
+	if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+		prefix += " IF NOT EXISTS ";
+	}
+	return prefix;
 }
 
 } // namespace duckdb

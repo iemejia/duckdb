@@ -9,8 +9,9 @@
 #pragma once
 
 #include "duckdb/parser/parsed_data/create_info.hpp"
-#include "duckdb/common/limits.hpp"
+#include "duckdb/common/optional.hpp"
 
+#include "duckdb/common/identifier.hpp"
 namespace duckdb {
 
 enum class SequenceInfo : uint8_t {
@@ -29,13 +30,10 @@ enum class SequenceInfo : uint8_t {
 };
 
 struct CreateSequenceInfo : public CreateInfo {
-	CreateSequenceInfo()
-	    : CreateInfo(CatalogType::SEQUENCE_ENTRY, INVALID_SCHEMA), name(string()), usage_count(0), increment(1),
-	      min_value(1), max_value(NumericLimits<int64_t>::Maximum()), start_value(1), cycle(false) {
-	}
+	CreateSequenceInfo();
 
 	//! Sequence name to create
-	string name;
+	Identifier name;
 	//! Usage count of the sequence
 	uint64_t usage_count;
 	//! The increment value
@@ -48,26 +46,17 @@ struct CreateSequenceInfo : public CreateInfo {
 	int64_t start_value;
 	//! Whether or not the sequence cycles
 	bool cycle;
+	//! The most recently returned value
+	optional<int64_t> last_value;
 
 public:
-	unique_ptr<CreateInfo> Copy() const override {
-		auto result = make_unique<CreateSequenceInfo>();
-		CopyProperties(*result);
-		result->name = name;
-		result->schema = schema;
-		result->usage_count = usage_count;
-		result->increment = increment;
-		result->min_value = min_value;
-		result->max_value = max_value;
-		result->start_value = start_value;
-		result->cycle = cycle;
-		return move(result);
-	}
+	unique_ptr<CreateInfo> Copy() const override;
 
-protected:
-	void SerializeInternal(Serializer &) const override {
-		throw NotImplementedException("Cannot serialize '%s'", CatalogTypeToString(type));
-	}
+public:
+	DUCKDB_API void Serialize(Serializer &serializer) const override;
+	DUCKDB_API static unique_ptr<CreateInfo> Deserialize(Deserializer &deserializer);
+
+	string ToString() const override;
 };
 
 } // namespace duckdb

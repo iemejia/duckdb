@@ -55,14 +55,9 @@
 #include <stdlib.h>
 #endif
 
-#ifndef WIN32
-#include <sys/types.h>
-#else
-#define int32_t __int32
-#define int64_t __int64
-#endif
+#include <stdint.h>
 
-#ifdef WIN32
+#ifdef _WIN32
 #include <sys/timeb.h>
 #define timeb _timeb
 #define ftime _ftime
@@ -81,7 +76,7 @@ typedef HUGE_TYPE ds_key_t;
 char *strdup(const char *);
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
 #include <winbase.h>

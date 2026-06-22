@@ -1,21 +1,30 @@
 #include "duckdb/common/file_buffer.hpp"
 
-#include "duckdb/common/allocator.hpp"
-#include "duckdb/common/checksum.hpp"
+#include "duckdb/storage/block_allocator.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/memory_mapped_file.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/storage/block_manager.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 #include <cstring>
 
 namespace duckdb {
 
-FileBuffer::FileBuffer(Allocator &allocator, FileBufferType type, uint64_t user_size)
+FileBuffer::FileBuffer(BlockAllocator &allocator, FileBufferType type, uint64_t user_size, idx_t block_header_size)
     : allocator(allocator), type(type) {
 	Init();
 	if (user_size) {
-		Resize(user_size);
+		ResizeInternal(user_size, block_header_size);
 	}
+}
+
+FileBuffer::FileBuffer(BlockAllocator &allocator, FileBufferType type, BlockManager &block_manager)
+    : allocator(allocator), type(type) {
+	Init();
+	Resize(block_manager);
 }
 
 void FileBuffer::Init() {
@@ -23,62 +32,69 @@ void FileBuffer::Init() {
 	size = 0;
 	internal_buffer = nullptr;
 	internal_size = 0;
-	malloced_buffer = nullptr;
-	malloced_size = 0;
+	owns_internal_buffer = true;
 }
 
-FileBuffer::FileBuffer(FileBuffer &source, FileBufferType type_p) : allocator(source.allocator), type(type_p) {
+FileBuffer::FileBuffer(FileBuffer &source, FileBufferType type_p, idx_t block_header_size)
+    : allocator(source.allocator), type(type_p) {
 	// take over the structures of the source buffer
-	buffer = source.buffer;
-	size = source.size;
+	buffer = source.internal_buffer + block_header_size;
+	size = source.internal_size - block_header_size;
 	internal_buffer = source.internal_buffer;
 	internal_size = source.internal_size;
-	malloced_buffer = source.malloced_buffer;
-	malloced_size = source.malloced_size;
+	owns_internal_buffer = source.owns_internal_buffer;
 
 	source.Init();
 }
 
 FileBuffer::~FileBuffer() {
-	if (!malloced_buffer) {
+	if (!internal_buffer || !owns_internal_buffer) {
 		return;
 	}
-	allocator.FreeData(malloced_buffer, malloced_size);
+	allocator.FreeData(internal_buffer, internal_size);
 }
 
-void FileBuffer::ReallocBuffer(size_t new_size) {
-	if (malloced_buffer) {
-		malloced_buffer = allocator.ReallocateData(malloced_buffer, malloced_size, new_size);
-	} else {
-		malloced_buffer = allocator.AllocateData(new_size);
+void FileBuffer::ReallocBuffer(idx_t new_size) {
+	if (internal_buffer && !owns_internal_buffer) {
+		throw InternalException(
+		    "Cannot resize a FileBuffer that does not own its internal buffer (it points into a memory-mapped region)");
 	}
-	if (!malloced_buffer) {
+	data_ptr_t new_buffer;
+	if (internal_buffer) {
+		new_buffer = allocator.ReallocateData(internal_buffer, internal_size, new_size);
+	} else {
+		new_buffer = allocator.AllocateData(new_size);
+	}
+
+	// FIXME: should we throw one of our exceptions here?
+	if (!new_buffer) {
 		throw std::bad_alloc();
 	}
-	malloced_size = new_size;
-	internal_buffer = malloced_buffer;
-	internal_size = malloced_size;
-	// Caller must update these.
+
+	internal_buffer = new_buffer;
+	internal_size = new_size;
+	owns_internal_buffer = true;
+
+	// The caller must update these.
 	buffer = nullptr;
 	size = 0;
 }
 
-FileBuffer::MemoryRequirement FileBuffer::CalculateMemory(uint64_t user_size) {
+FileBuffer::MemoryRequirement FileBuffer::CalculateMemory(uint64_t user_size, uint64_t block_header_size) const {
 	FileBuffer::MemoryRequirement result;
-
 	if (type == FileBufferType::TINY_BUFFER) {
 		// We never do IO on tiny buffers, so there's no need to add a header or sector-align.
 		result.header_size = 0;
 		result.alloc_size = user_size;
 	} else {
-		result.header_size = Storage::BLOCK_HEADER_SIZE;
-		result.alloc_size = AlignValue<uint32_t, Storage::SECTOR_SIZE>(result.header_size + user_size);
+		result.header_size = block_header_size;
+		result.alloc_size = AlignValue<idx_t, Storage::SECTOR_SIZE>(result.header_size + user_size);
 	}
 	return result;
 }
 
-void FileBuffer::Resize(uint64_t new_size) {
-	auto req = CalculateMemory(new_size);
+void FileBuffer::ResizeInternal(uint64_t new_size, uint64_t block_header_size) {
+	auto req = CalculateMemory(new_size, block_header_size);
 	ReallocBuffer(req.alloc_size);
 
 	if (new_size > 0) {
@@ -87,39 +103,53 @@ void FileBuffer::Resize(uint64_t new_size) {
 	}
 }
 
-void FileBuffer::Read(FileHandle &handle, uint64_t location) {
-	D_ASSERT(type != FileBufferType::TINY_BUFFER);
-	handle.Read(internal_buffer, internal_size, location);
+void FileBuffer::Resize(uint64_t new_size, idx_t block_header_size) {
+	ResizeInternal(new_size, block_header_size);
 }
 
-void FileBuffer::ReadAndChecksum(FileHandle &handle, uint64_t location) {
-	// read the buffer from disk
-	Read(handle, location);
-	// compute the checksum
-	auto stored_checksum = Load<uint64_t>(internal_buffer);
-	uint64_t computed_checksum = Checksum(buffer, size);
-	// verify the checksum
-	if (stored_checksum != computed_checksum) {
-		throw IOException("Corrupt database file: computed checksum %llu does not match stored checksum %llu in block",
-		                  computed_checksum, stored_checksum);
+void FileBuffer::Resize(BlockManager &block_manager) {
+	ResizeInternal(block_manager.GetBlockSize(), block_manager.GetBlockHeaderSize());
+}
+
+void FileBuffer::Read(QueryContext context, FileHandle &handle, uint64_t location) {
+	D_ASSERT(type != FileBufferType::TINY_BUFFER);
+	handle.Read(context, internal_buffer, internal_size, location);
+}
+
+void FileBuffer::Read(QueryContext context, MemoryMappedFile &handle, uint64_t location) {
+	D_ASSERT(type != FileBufferType::TINY_BUFFER);
+	// Zero-copy: adopt a pointer into the mapping.
+	auto src = handle.GetDataMutable(location, internal_size);
+	const idx_t header_size = internal_size - size;
+	if (internal_buffer && owns_internal_buffer) {
+		allocator.FreeData(internal_buffer, internal_size);
 	}
+	internal_buffer = src;
+	buffer = internal_buffer + header_size;
+	owns_internal_buffer = false;
 }
 
-void FileBuffer::Write(FileHandle &handle, uint64_t location) {
+void FileBuffer::Write(QueryContext context, FileHandle &handle, const uint64_t location) {
 	D_ASSERT(type != FileBufferType::TINY_BUFFER);
-	handle.Write(internal_buffer, internal_size, location);
+	handle.Write(context, internal_buffer, internal_size, location);
 }
 
-void FileBuffer::ChecksumAndWrite(FileHandle &handle, uint64_t location) {
-	// compute the checksum and write it to the start of the buffer (if not temp buffer)
-	uint64_t checksum = Checksum(buffer, size);
-	Store<uint64_t>(checksum, internal_buffer);
-	// now write the buffer
-	Write(handle, location);
+void FileBuffer::Write(QueryContext context, MemoryMappedFile &handle, uint64_t location) {
+	D_ASSERT(type != FileBufferType::TINY_BUFFER);
+	auto dst = handle.GetDataMutable(location, internal_size);
+	memcpy(dst, internal_buffer, internal_size);
 }
 
 void FileBuffer::Clear() {
 	memset(internal_buffer, 0, internal_size);
+}
+
+void FileBuffer::Initialize(DebugInitialize initialize) {
+	if (initialize == DebugInitialize::NO_INITIALIZE) {
+		return;
+	}
+	uint8_t value = initialize == DebugInitialize::DEBUG_ZERO_INITIALIZE ? 0 : 0xFF;
+	memset(internal_buffer, value, internal_size);
 }
 
 } // namespace duckdb

@@ -2,10 +2,10 @@
 # group: [grouped]
 
 statement ok
-pragma enable_verification
+pragma verify_parallelism
 
 statement ok
-pragma verify_parallelism
+SET debug_force_external=true;
 
 # 10000 is the radix_limit
 

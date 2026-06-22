@@ -1,7 +1,6 @@
 #include "capi_tester.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 struct MyBaseNumber {
 	int number;
@@ -30,7 +29,7 @@ void number_scanner(duckdb_replacement_scan_info info, const char *table_name, v
 
 TEST_CASE("Test replacement scans in C API", "[capi]") {
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 
 	// open the database in in-memory mode
 	REQUIRE(tester.OpenDatabase(nullptr));
@@ -69,7 +68,7 @@ void error_replacement_scan(duckdb_replacement_scan_info info, const char *table
 
 TEST_CASE("Test error replacement scan", "[capi]") {
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 
 	// open the database in in-memory mode
 	REQUIRE(tester.OpenDatabase(nullptr));

@@ -3,9 +3,6 @@
 # group: [string]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE strings(a STRING, b STRING)
 
 statement ok
@@ -68,9 +65,11 @@ MotörHead,SUFFIX
 # concat WS needs at least two parameters
 statement error
 select CONCAT_WS()
+----
 
 statement error
 select CONCAT_WS(',')
+----
 
 # one entry: just returns the entry
 query T

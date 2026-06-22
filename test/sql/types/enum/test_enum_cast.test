@@ -3,9 +3,6 @@
 # group: [enum]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
 
 statement ok
@@ -77,6 +74,7 @@ INSERT INTO albums_error VALUES ('Tenacious D', '2001'), ('The Pick of Destiny',
 # Conversion Error: Could not convert string 'bla' to INT32
 statement error
 select name, year_release::INT from albums_error
+----
 
 query II
 select name, year_release::INT from albums_error where year_release = '2001'

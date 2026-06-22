@@ -2,9 +2,6 @@
 # description: Test printf
 # group: [string]
 
-statement ok
-PRAGMA enable_verification
-
 # printf without format specifiers
 query TT
 SELECT printf('hello'), printf(NULL)
@@ -34,6 +31,12 @@ query TT
 SELECT printf('%d', 33), printf('%d + %d = %d', 3, 5, 3 + 5)
 ----
 33	3 + 5 = 8
+
+# maximum of ubigint
+query I
+SELECT printf('%d', 18446744073709551615::UBIGINT);
+----
+18446744073709551615
 
 # integers with special formatting specifiers
 query TTT
@@ -68,9 +71,55 @@ SELECT printf('%s', BLOB '\x01\xa0')
 
 # hugeint
 query T
-SELECT printf('%s', 120381902481294715712::HUGEINT)
+SELECT printf('%d', 120381902481294715712::HUGEINT)
 ----
 120381902481294715712
+
+query I
+SELECT printf('%d', '-170141183460469231731687303715884105728'::HUGEINT)
+----
+-170141183460469231731687303715884105728
+
+query I
+SELECT printf('%d', '170141183460469231731687303715884105727'::HUGEINT)
+----
+170141183460469231731687303715884105727
+
+# uhugeint
+query T
+SELECT printf('%d', 120381902481294715712::UHUGEINT)
+----
+120381902481294715712
+
+query I
+SELECT printf('%d', '340282366920938463463374607431768211455'::UHUGEINT)
+----
+340282366920938463463374607431768211455
+
+query I
+select printf('%x', 255::utinyint);
+----
+ff
+
+query I
+select printf('%x', 65535::usmallint);
+----
+ffff
+
+query I
+select printf('%x', 4294967295::uinteger);
+----
+ffffffff
+
+query I
+select printf('%x', 18446744073709551615::ubigint);
+----
+ffffffffffffffff
+
+query I
+select printf('%x', '340282366920938463463374607431768211455'::uhugeint);
+----
+ffffffffffffffffffffffffffffffff
 
 # decimal
 query T
@@ -83,6 +132,11 @@ query T
 SELECT printf('%d %x %o %#x %#o', 100, 100, 100, 100, 100)
 ----
 100 64 144 0x64 0144
+
+query I
+select printf('%b', '-170141183460469231731687303715884105728'::HUGEINT);
+----
+10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 
 # ascii characters
 query T
@@ -112,9 +166,11 @@ floats: 3.14 +3e+00 3.141600E+00
 # too few parameters
 statement error
 SELECT printf('%s')
+----
 
 statement error
 SELECT printf('%s %s', 'hello')
+----
 
 # excess parameters are ignored
 query T
@@ -125,9 +181,11 @@ hello
 # incorrect types
 statement error
 SELECT printf('%s', 42)
+----
 
 statement error
 SELECT printf('%d', 'hello')
+----
 
 # Test printf with vectors
 statement ok
@@ -145,9 +203,10 @@ INSERT INTO strings VALUES (3, NULL, 30, 'abcde')
 # printf without format specifiers: too few parameters
 statement error
 SELECT printf(fmt) FROM strings ORDER BY idx
+----
 
 query T
-SELECT printf(CASE WHEN pint < 15 THEN NULL ELSE pint END) FROM strings ORDER BY idx
+SELECT printf(CASE WHEN pint < 15 THEN NULL ELSE pint::VARCHAR END) FROM strings ORDER BY idx
 ----
 NULL
 20

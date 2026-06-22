@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "duckdb/common/types/chunk_collection.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 
@@ -18,41 +17,61 @@ namespace duckdb {
 //! It assumes that all functions have a common partitioning and ordering
 class PhysicalWindow : public PhysicalOperator {
 public:
-	PhysicalWindow(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list, idx_t estimated_cardinality,
-	               PhysicalOperatorType type = PhysicalOperatorType::WINDOW);
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::WINDOW;
+
+public:
+	PhysicalWindow(PhysicalPlan &physical_plan, vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
+	               idx_t estimated_cardinality, vector<column_t> partitions);
+	PhysicalWindow(PhysicalPlan &physical_plan, vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
+	               idx_t estimated_cardinality);
 
 	//! The projection list of the WINDOW statement (may contain aggregates)
 	vector<unique_ptr<Expression>> select_list;
-	//! Whether or not the window is order dependent (only true if all window functions contain neither an order nor a
+	//! The window expression with the order clause
+	idx_t order_idx;
+	//! Whether or not the window is order dependent (only true if ANY window function contains neither an order nor a
 	//! partition clause)
 	bool is_order_dependent;
+	//! The partitions over which this is grouped (if any)
+	OperatorPartitionInfo partition_info;
 
 public:
 	// Source interface
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	void GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-	             LocalSourceState &lstate) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
+	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
+	                                       LocalSourceState &lstate,
+	                                       const OperatorPartitionInfo &partition_info) const override;
 
+	bool IsSource() const override {
+		return true;
+	}
 	bool ParallelSource() const override {
 		return true;
 	}
 
-	bool IsOrderPreserving() const override {
-		return true;
-	}
+	bool SupportsPartitioning(const OperatorPartitionInfo &partition_info) const override;
+	OrderPreservationType SourceOrder() const override;
+
+	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate_p) const override;
 
 public:
 	// Sink interface
-	SinkResultType Sink(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate,
-	                    DataChunk &input) const override;
-	void Combine(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate) const override;
+	SinkNextBatchType NextBatch(ExecutionContext &context, OperatorSinkNextBatchInput &input) const override;
+	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
+	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
-	                          GlobalSinkState &gstate) const override;
+	                          OperatorSinkFinalizeInput &input) const override;
+	ProgressData GetSinkProgress(ClientContext &context, GlobalSinkState &gstate,
+	                             const ProgressData source_progress) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
+
+	OperatorPartitionInfo RequiredPartitionInfo() const override;
 
 	bool IsSink() const override {
 		return true;
@@ -62,14 +81,14 @@ public:
 		return !is_order_dependent;
 	}
 
-	bool IsOrderDependent() const override {
+	bool SinkOrderDependent() const override {
 		return is_order_dependent;
 	}
 
 public:
 	idx_t MaxThreads(ClientContext &context);
 
-	string ParamsToString() const override;
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 };
 
 } // namespace duckdb

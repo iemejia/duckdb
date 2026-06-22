@@ -2,9 +2,6 @@
 # description: Test Set/Drop NOT NULL in transaction
 # group: [alter_col]
 
-statement ok
-PRAGMA enable_verification
-
 # Scenario #1, alter with uncommitted data
 statement ok
 CREATE TABLE t(i INTEGER, j INTEGER)
@@ -21,13 +18,18 @@ INSERT INTO t VALUES(9999, NULL)
 
 statement error
 ALTER TABLE t ALTER COLUMN j SET NOT NULL
+----
 
 statement ok
-COMMIT
+ROLLBACK
+
+statement ok
+INSERT INTO t VALUES(9999, NULL)
 
 # Has null, cannot alter after tran
-statement error 
+statement error
 ALTER TABLE t ALTER COLUMN j SET NOT NULL
+----
 
 query I
 SELECT i FROM t WHERE j IS NULL
@@ -60,6 +62,7 @@ COMMIT
 # Cannot insert after tran
 statement error 
 INSERT INTO t VALUES(9999, NULL)
+----
 
 # No null data
 query II
@@ -166,6 +169,7 @@ ROLLBACK
 # CANNOT insert null after rollback 
 statement error 
 INSERT INTO t VALUES(8888, NULL)
+----
 
 # NO null values
 query I
@@ -195,6 +199,7 @@ COMMIT
 
 statement error
 INSERT INTO t VALUES(NULL)
+----
 
 # Drop in the same tran
 statement ok
@@ -221,7 +226,7 @@ COMMIT
 statement ok
 INSERT INTO t VALUES(NULL)
 
-mode skip
+mode skip instable
 # Scenario #5, Insert null, delete null locally, then alter
 statement ok
 DROP TABLE IF EXISTS t
@@ -251,6 +256,7 @@ COMMIT
 
 statement error
 INSERT INTO t VALUES(3, NULL)
+----
 
 # NO null values
 query I

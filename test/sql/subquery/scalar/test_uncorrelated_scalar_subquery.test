@@ -3,7 +3,7 @@
 # group: [scalar]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE integers(i INTEGER)
@@ -67,7 +67,15 @@ NULL
 # return more than one row in a scalar subquery
 # controversial: in postgres this gives an error
 # but SQLite accepts it and just uses the first value
-# we choose to agree with SQLite here
+# we choose to agree with Postgres here
+statement error
+SELECT * FROM integers WHERE i=(SELECT i FROM integers WHERE i IS NOT NULL ORDER BY i)
+----
+More than one row returned by a subquery
+
+statement ok
+SET scalar_subquery_error_on_multiple_rows=false
+
 query I
 SELECT * FROM integers WHERE i=(SELECT i FROM integers WHERE i IS NOT NULL ORDER BY i)
 ----
@@ -82,9 +90,11 @@ SELECT * FROM integers WHERE i=(SELECT i FROM integers WHERE i IS NOT NULL ORDER
 # returning multiple columns should fail though
 statement error
 SELECT * FROM integers WHERE i=(SELECT 1, 2)
+----
 
 statement error
 SELECT * FROM integers WHERE i=(SELECT i, i + 2 FROM integers)
+----
 
 # but not for EXISTS queries!
 query I
@@ -112,6 +122,7 @@ SELECT (SELECT * FROM integers WHERE i=1)
 # but not if the star expands to more than one column!
 statement error
 SELECT (SELECT * FROM integers i1, integers i2)
+----
 
 #  uncorrelated subquery in SELECT
 query I

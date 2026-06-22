@@ -3,7 +3,7 @@
 # group: [generic]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 # test constant BETWEEN statement
 # simple between
@@ -249,3 +249,8 @@ SELECT *
 FROM issue3588
 WHERE (SELECT 0) BETWEEN 0 AND issue3588.c0;
 
+# internal between function cannot be called by the user
+statement error
+SELECT "__between"(2,0,10)
+----
+cannot be called directly

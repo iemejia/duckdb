@@ -3,9 +3,6 @@
 # group: [any_all]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE integers(i INTEGER)
 
 statement ok
@@ -80,3 +77,13 @@ SELECT NULL > ALL(SELECT * FROM integers)
 ----
 NULL
 
+# unsupported comparisons
+statement error
+SELECT 2 ^ ANY(SELECT * FROM integers)
+----
+Parser Error: ANY and ALL operators require one of =,<>,>,<,>=,<= comparisons!
+
+statement error
+SELECT 2 ^ ANY([1, 2, 3])
+----
+Parser Error: Unsupported comparison "^" for ANY/ALL subquery

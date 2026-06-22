@@ -16,6 +16,9 @@ namespace duckdb {
 
 class AlterStatement : public SQLStatement {
 public:
+	static constexpr const StatementType TYPE = StatementType::ALTER_STATEMENT;
+
+public:
 	AlterStatement();
 
 	unique_ptr<AlterInfo> info;
@@ -25,6 +28,7 @@ protected:
 
 public:
 	unique_ptr<SQLStatement> Copy() const override;
+	string ToString() const override;
 };
 
 } // namespace duckdb

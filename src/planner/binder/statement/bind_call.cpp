@@ -1,29 +1,44 @@
-#include "duckdb/planner/binder.hpp"
 #include "duckdb/parser/statement/call_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
-#include "duckdb/planner/tableref/bound_table_function.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
 
-BoundStatement Binder::Bind(CallStatement &stmt) {
-	BoundStatement result;
-
-	TableFunctionRef ref;
-	ref.function = move(stmt.function);
-
-	auto bound_func = Bind(ref);
-	auto &bound_table_func = (BoundTableFunction &)*bound_func;
-	auto &get = (LogicalGet &)*bound_table_func.get;
-	D_ASSERT(get.returned_types.size() > 0);
-	for (idx_t i = 0; i < get.returned_types.size(); i++) {
-		get.column_ids.push_back(i);
+static optional_ptr<LogicalGet> FindTableFunctionGet(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		return op.Cast<LogicalGet>();
 	}
+	for (auto &child : op.children) {
+		auto get = FindTableFunctionGet(*child);
+		if (get) {
+			return get;
+		}
+	}
+	return nullptr;
+}
 
-	result.types = get.returned_types;
-	result.names = get.names;
-	result.plan = CreatePlan(*bound_func);
-	properties.return_type = StatementReturnType::QUERY_RESULT;
+BoundStatement Binder::Bind(CallStatement &stmt) {
+	SelectStatement select_statement;
+	auto select_node = make_uniq<SelectNode>();
+	auto table_function = make_uniq<TableFunctionRef>();
+	table_function->function = std::move(stmt.function);
+	select_node->select_list.push_back(make_uniq<StarExpression>());
+	select_node->from_table = std::move(table_function);
+	select_statement.node = std::move(select_node);
+
+	auto result = Bind(select_statement);
+	auto &properties = GetStatementProperties();
+	properties.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
+	// use the return type of the table function (if any) instead of the default query result
+	if (result.plan) {
+		auto get = FindTableFunctionGet(*result.plan);
+		if (get) {
+			properties.return_type = get->function.call_return_type;
+		}
+	}
 	return result;
 }
 

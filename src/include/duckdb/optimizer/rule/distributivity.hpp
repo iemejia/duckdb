@@ -18,12 +18,12 @@ class DistributivityRule : public Rule {
 public:
 	explicit DistributivityRule(ExpressionRewriter &rewriter);
 
-	unique_ptr<Expression> Apply(LogicalOperator &op, vector<Expression *> &bindings, bool &changes_made,
+	unique_ptr<Expression> Apply(LogicalOperator &op, vector<reference<Expression>> &bindings, bool &changes_made,
 	                             bool is_root) override;
 
 private:
 	void AddExpressionSet(Expression &expr, expression_set_t &set);
-	unique_ptr<Expression> ExtractExpression(BoundConjunctionExpression &conj, idx_t idx, Expression &expr);
+	unique_ptr<Expression> ExtractExpression(BoundConjunctionExpression &conj, idx_t idx, const Expression &expr);
 };
 
 } // namespace duckdb

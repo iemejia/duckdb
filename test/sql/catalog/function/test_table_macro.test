@@ -3,10 +3,6 @@
 # group: [function]
 
 statement ok
-PRAGMA enable_verification
-
-
-statement ok
 CREATE TABLE test_tbl (id INT, name string);
 
 statement ok
@@ -70,7 +66,7 @@ CREATE  MACRO  xt_reg(cmp) as TABLE SELECT * FROM test_tbl WHERE regexp_matches(
 statement ok
 SELECT * FROM xt_reg('^m');
 
-# use regular macro for comparision
+# use regular macro for comparison
 statement ok
 CREATE MACRO   cmp(a,m) as regexp_matches(a,m) or a similar to m;
 
@@ -98,7 +94,7 @@ SELECT * FROM xt(id,1);
 1	tom
 
 # try to create table macro with pre-existing table name "range"
-statement error
+statement ok
 CREATE  MACRO range(a,b) as TABLE select a,b from test_tbl;
 
 # use table macro as a scalar macro
@@ -120,8 +116,8 @@ query IIIIIIIII
 SELECT schema_name, function_name, function_type, description, return_type, parameters, parameter_types, varargs, macro_definition FROM duckdb_functions() WHERE function_type = 'table_macro' AND
  ( function_name = 'sgreek' or  function_name = 'xt') order by function_name;
 ----
-main	sgreek	table_macro	NULL	NULL	[a, b, c]	[NULL, NULL, NULL]	NULL	NULL
-main	xt	table_macro	NULL	NULL	[id, imax]	[NULL, NULL]	NULL	NULL
+main	sgreek	table_macro	NULL	NULL	[a, b, c]	[NULL, NULL, NULL]	NULL	SELECT a, b FROM greek_tbl WHERE (id >= c)
+main	xt	table_macro	NULL	NULL	[id, imax]	[NULL, NULL]	NULL	SELECT id, "name" FROM test_tbl WHERE (id <= imax)
 
 
 

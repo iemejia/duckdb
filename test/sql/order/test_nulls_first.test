@@ -3,7 +3,7 @@
 # group: [order]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE integers(i INTEGER)
@@ -115,13 +115,20 @@ PRAGMA default_null_order='NULLS FIRST'
 
 statement error
 PRAGMA default_null_order())
+----
+<REGEX>:Parser Error.*syntax error.*
 
 statement error
 PRAGMA default_null_order='UNKNOWN'
+----
+<REGEX>:Parser Error.*Unrecognized parameter for option.*
 
 statement error
 PRAGMA default_null_order=UNKNOWN)
+----
+<REGEX>:Parser Error.*syntax error.*
 
 statement error
 PRAGMA default_null_order=3)
-
+----
+<REGEX>:Parser Error.*syntax error.*

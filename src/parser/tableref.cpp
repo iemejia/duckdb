@@ -1,20 +1,21 @@
 #include "duckdb/parser/tableref.hpp"
 
 #include "duckdb/common/printer.hpp"
-#include "duckdb/common/field_writer.hpp"
-#include "duckdb/parser/tableref/list.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/to_string.hpp"
 
 namespace duckdb {
 
 string TableRef::BaseToString(string result) const {
-	vector<string> column_name_alias;
-	return BaseToString(move(result), column_name_alias);
+	vector<Identifier> column_name_alias;
+	return BaseToString(std::move(result), column_name_alias);
 }
 
-string TableRef::BaseToString(string result, const vector<string> &column_name_alias) const {
+string TableRef::AliasToString(const vector<Identifier> &column_name_alias) const {
+	string result;
 	if (!alias.empty()) {
-		result += " AS " + KeywordHelper::WriteOptionallyQuoted(alias);
+		result += StringUtil::Format(" AS %s", alias);
 	}
 	if (!column_name_alias.empty()) {
 		D_ASSERT(!alias.empty());
@@ -23,73 +24,33 @@ string TableRef::BaseToString(string result, const vector<string> &column_name_a
 			if (i > 0) {
 				result += ", ";
 			}
-			result += KeywordHelper::WriteOptionallyQuoted(column_name_alias[i]);
+			result += SQLIdentifier(column_name_alias[i]);
 		}
 		result += ")";
 	}
+	return result;
+}
+
+string TableRef::SampleToString() const {
+	string result;
 	if (sample) {
-		result += " TABLESAMPLE " + SampleMethodToString(sample->method);
+		result += " TABLESAMPLE " + EnumUtil::ToString(sample->method);
 		result += "(" + sample->sample_size.ToString() + " " + string(sample->is_percentage ? "PERCENT" : "ROWS") + ")";
-		if (sample->seed >= 0) {
-			result += "REPEATABLE (" + to_string(sample->seed) + ")";
+		if (sample->seed.IsValid()) {
+			result += "REPEATABLE (" + to_string(sample->seed.GetIndex()) + ")";
 		}
 	}
-
 	return result;
 }
 
-bool TableRef::Equals(const TableRef *other) const {
-	return other && type == other->type && alias == other->alias &&
-	       SampleOptions::Equals(sample.get(), other->sample.get());
-}
-
-void TableRef::Serialize(Serializer &serializer) const {
-	FieldWriter writer(serializer);
-	writer.WriteField<TableReferenceType>(type);
-	writer.WriteString(alias);
-	writer.WriteOptional(sample);
-	Serialize(writer);
-	writer.Finalize();
-}
-
-unique_ptr<TableRef> TableRef::Deserialize(Deserializer &source) {
-	FieldReader reader(source);
-
-	auto type = reader.ReadRequired<TableReferenceType>();
-	auto alias = reader.ReadRequired<string>();
-	auto sample = reader.ReadOptional<SampleOptions>(nullptr);
-	unique_ptr<TableRef> result;
-	switch (type) {
-	case TableReferenceType::BASE_TABLE:
-		result = BaseTableRef::Deserialize(reader);
-		break;
-	case TableReferenceType::CROSS_PRODUCT:
-		result = CrossProductRef::Deserialize(reader);
-		break;
-	case TableReferenceType::JOIN:
-		result = JoinRef::Deserialize(reader);
-		break;
-	case TableReferenceType::SUBQUERY:
-		result = SubqueryRef::Deserialize(reader);
-		break;
-	case TableReferenceType::TABLE_FUNCTION:
-		result = TableFunctionRef::Deserialize(reader);
-		break;
-	case TableReferenceType::EMPTY:
-		result = EmptyTableRef::Deserialize(reader);
-		break;
-	case TableReferenceType::EXPRESSION_LIST:
-		result = ExpressionListRef::Deserialize(reader);
-		break;
-	case TableReferenceType::CTE:
-	case TableReferenceType::INVALID:
-		throw InternalException("Unsupported type for TableRef::Deserialize");
-	}
-	reader.Finalize();
-
-	result->alias = alias;
-	result->sample = move(sample);
+string TableRef::BaseToString(string result, const vector<Identifier> &column_name_alias) const {
+	result += AliasToString(column_name_alias);
+	result += SampleToString();
 	return result;
+}
+
+bool TableRef::Equals(const TableRef &other) const {
+	return type == other.type && alias == other.alias && SampleOptions::Equals(sample.get(), other.sample.get());
 }
 
 void TableRef::CopyProperties(TableRef &target) const {
@@ -97,10 +58,21 @@ void TableRef::CopyProperties(TableRef &target) const {
 	target.alias = alias;
 	target.query_location = query_location;
 	target.sample = sample ? sample->Copy() : nullptr;
+	target.external_dependency = external_dependency;
 }
 
 void TableRef::Print() {
 	Printer::Print(ToString());
+}
+
+bool TableRef::Equals(const unique_ptr<TableRef> &left, const unique_ptr<TableRef> &right) {
+	if (left.get() == right.get()) {
+		return true;
+	}
+	if (!left || !right) {
+		return false;
+	}
+	return left->Equals(*right);
 }
 
 } // namespace duckdb

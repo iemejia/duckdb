@@ -10,35 +10,42 @@
 
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/identifier.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/enums/output_type.hpp"
-#include "duckdb/common/enums/profiler_format.hpp"
+#include "duckdb/common/progress_bar/progress_bar.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/parser/expression/lambda_expression.hpp"
+#include "duckdb/main/query_profiler.hpp"
+#include "duckdb/main/user_settings.hpp"
 
 namespace duckdb {
+
 class ClientContext;
 class PhysicalResultCollector;
 class PreparedStatementData;
 
-typedef std::function<unique_ptr<PhysicalResultCollector>(ClientContext &context, PreparedStatementData &data)>
+typedef std::function<unique_ptr<PhysicalOperator>(ClientContext &context, PreparedStatementData &data)>
     get_result_collector_t;
 
 struct ClientConfig {
-	//! The home directory used by the system (if any)
-	string home_directory;
 	//! If the query profiler is enabled or not.
 	bool enable_profiler = false;
-	//! If detailed query profiling is enabled
-	bool enable_detailed_profiling = false;
 	//! The format to print query profiling information in (default: query_tree), if enabled.
-	ProfilerPrintFormat profiler_print_format = ProfilerPrintFormat::QUERY_TREE;
+	//! This is the profiler format name passed to QueryProfiler::CreateProfiler.
+	string profiler_print_format = "query_tree";
 	//! The file to save query profiling information to, instead of printing it to the console
 	//! (empty = print to console)
 	string profiler_save_location;
+	//! Glob patterns for tracked_metrics (controls which metrics are gathered and displayed).
+	//! Default "*" means all metrics are tracked.
+	vector<string> tracked_metrics = {"*"};
+	//! Settings that are passed to the renderer of the profiler output (e.g. 'maximum_render_width' for the text
+	//! renderer). Settings that are not recognized by the active renderer are ignored.
+	unordered_map<string, Value> profiling_renderer_settings;
 
-	//! Allows suppressing profiler output, even if enabled. We turn on the profiler on all test runs but don't want
-	//! to output anything
-	bool emit_profiler_output = true;
-
+	//! system-wide progress bar disable.
+	const char *system_progress_bar_disable_reason = nullptr;
 	//! If the progress bar is enabled or not.
 	bool enable_progress_bar = false;
 	//! If the print of the progress bar is enabled
@@ -46,53 +53,70 @@ struct ClientConfig {
 	//! The wait time before showing the progress bar
 	int wait_time = 2000;
 
-	//! Preserve identifier case while parsing.
-	//! If false, all unquoted identifiers are lower-cased (e.g. "MyTable" -> "mytable").
-	bool preserve_identifier_case = true;
-	//! The maximum expression depth limit in the parser
-	idx_t max_expression_depth = 1000;
-
-	//! Whether or not aggressive query verification is enabled
-	bool query_verification_enabled = false;
-	//! Whether or not verification of external operators is enabled, used for testing
-	bool verify_external = false;
-	//! Whether or not we should verify the serializer
-	bool verify_serializer = false;
-	//! Enable the running of optimizers
-	bool enable_optimizer = true;
 	//! Force parallelism of small tables, used for testing
 	bool verify_parallelism = false;
-	//! Force index join independent of table cardinality, used for testing
-	bool force_index_join = false;
-	//! Force out-of-core computation for operators that support it, used for testing
-	bool force_external = false;
-	//! Force disable cross product generation when hyper graph isn't connected, used for testing
-	bool force_no_cross_product = false;
-	//! Maximum bits allowed for using a perfect hash table (i.e. the perfect HT can hold up to 2^perfect_ht_threshold
-	//! elements)
-	idx_t perfect_ht_threshold = 12;
+	//! If this context should also try to use the available replacement scans
+	//! True by default
+	bool use_replacement_scans = true;
 
-	//! The explain output type used when none is specified (default: PHYSICAL_ONLY)
-	ExplainOutputType explain_output_type = ExplainOutputType::PHYSICAL_ONLY;
+	//! The maximum amount of memory to keep buffered in a streaming query result. Default: 1mb.
+	idx_t streaming_buffer_size = 1000000;
+
+	//! The maximum memory for query intermediates (sorts, hash tables) per connection (in bytes). Default: Global
+	//! memory limit.
+	optional_idx operator_memory_limit;
+
+	//! Callback to create a progress bar display
+	progress_bar_display_create_func_t display_create_func = nullptr;
+
+	//! The profiling coverage. SELECT is the default behavior, and ALL emits profiling information for all operator
+	//! types.
+	ProfilingCoverage profiling_coverage = ProfilingCoverage::SELECT;
 
 	//! Generic options
-	case_insensitive_map_t<Value> set_variables;
+	LocalUserSettings user_settings;
 
-	//! Function that is used to create the result collector for a materialized result
-	//! Defaults to PhysicalMaterializedCollector
-	get_result_collector_t result_collector = nullptr;
+	//! Variables set by the user
+	identifier_map_t<Value> user_variables;
+
+	//! Function that is used to create the result collector for a materialized result.
+	get_result_collector_t get_result_collector = nullptr;
 
 public:
 	static ClientConfig &GetConfig(ClientContext &context);
 	static const ClientConfig &GetConfig(const ClientContext &context);
 
-	static string ExtractTimezoneFromConfig(ClientConfig &config);
+	void SetUserVariable(const String &name, Value value);
+	bool GetUserVariable(const Identifier &name, Value &result);
+	bool GetUserVariable(const string &name, Value &result);
+	void ResetUserVariable(const String &name);
 
-	string ExtractTimezone() const;
+public:
+	void SetDefaultStreamingBufferSize();
+};
 
-	bool AnyVerification() {
-		return query_verification_enabled || verify_external || verify_serializer;
+struct ScopedConfigSetting {
+public:
+	using config_modify_func_t = std::function<void(ClientConfig &config)>;
+
+public:
+	explicit ScopedConfigSetting(ClientConfig &config, config_modify_func_t set_f = nullptr,
+	                             config_modify_func_t unset_f = nullptr)
+	    : config(config), set(std::move(set_f)), unset(std::move(unset_f)) {
+		if (set) {
+			set(config);
+		}
 	}
+	~ScopedConfigSetting() {
+		if (unset) {
+			unset(config);
+		}
+	}
+
+public:
+	ClientConfig &config;
+	config_modify_func_t set;
+	config_modify_func_t unset;
 };
 
 } // namespace duckdb

@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/parser/parsed_data/vacuum_info.hpp
+// duckdb/parser/parsed_data/load_info.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -10,21 +10,32 @@
 
 #include "duckdb/parser/parsed_data/parse_info.hpp"
 
+#include "duckdb/common/identifier.hpp"
 namespace duckdb {
 
-enum class LoadType { LOAD, INSTALL, FORCE_INSTALL };
+enum class LoadType : uint8_t { LOAD, INSTALL, FORCE_INSTALL, LOAD_AS };
 
 struct LoadInfo : public ParseInfo {
-	std::string filename;
-	LoadType load_type;
+public:
+	static constexpr const ParseInfoType TYPE = ParseInfoType::LOAD_INFO;
 
 public:
-	unique_ptr<LoadInfo> Copy() const {
-		auto result = make_unique<LoadInfo>();
-		result->filename = filename;
-		result->load_type = load_type;
-		return result;
+	LoadInfo() : ParseInfo(TYPE) {
 	}
+
+	string filename;
+	string repository;
+	bool repo_is_alias;
+	string version;
+	LoadType load_type;
+	Identifier alias;
+
+public:
+	unique_ptr<LoadInfo> Copy() const;
+	string ToString() const;
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ParseInfo> Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

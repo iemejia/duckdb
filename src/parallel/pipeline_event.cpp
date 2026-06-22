@@ -3,7 +3,7 @@
 
 namespace duckdb {
 
-PipelineEvent::PipelineEvent(shared_ptr<Pipeline> pipeline_p) : BasePipelineEvent(move(pipeline_p)) {
+PipelineEvent::PipelineEvent(shared_ptr<Pipeline> pipeline_p) : BasePipelineEvent(std::move(pipeline_p)) {
 }
 
 void PipelineEvent::Schedule() {
@@ -12,12 +12,10 @@ void PipelineEvent::Schedule() {
 	try {
 		pipeline->Schedule(event);
 		D_ASSERT(total_tasks > 0);
-	} catch (Exception &ex) {
-		executor.PushError(PreservedError(ex));
 	} catch (std::exception &ex) {
-		executor.PushError(PreservedError(ex));
+		executor.PushError(ErrorData(ex));
 	} catch (...) { // LCOV_EXCL_START
-		executor.PushError(PreservedError("Unknown exception in Finalize!"));
+		executor.PushError(ErrorData("Unknown exception while calling pipeline->Schedule(event)!"));
 	} // LCOV_EXCL_STOP
 }
 

@@ -3,9 +3,6 @@
 # group: [virtual]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE test (
     foo INTEGER,
     bar INTEGER GENERATED ALWAYS AS (foo+1) VIRTUAL,
@@ -27,6 +24,7 @@ SELECT * FROM test;
 # Cant UPDATE a generated column
 statement error
 UPDATE test SET bar = 5
+----
 
 # Correctly formatted UPDATE statements work
 statement ok

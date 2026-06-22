@@ -4,101 +4,49 @@
 
 namespace duckdb {
 
-Node256::Node256() : Node(NodeType::N256) {
+void Node256::InsertChild(ART &art, Node &node, const uint8_t byte, const Node child) {
+	NodeHandle<Node256> handle(art, node);
+	auto &n = handle.Get();
+	n.count++;
+	n.children[byte] = child;
 }
 
-idx_t Node256::GetChildPos(uint8_t k) {
-	if (children[k]) {
-		return k;
-	} else {
-		return DConstants::INVALID_INDEX;
-	}
-}
+void Node256::DeleteChild(ART &art, Node &node, const uint8_t byte) {
+	{
+		NodeHandle<Node256> handle(art, node);
+		auto &n = handle.Get();
 
-idx_t Node256::GetChildGreaterEqual(uint8_t k, bool &equal) {
-	for (idx_t pos = k; pos < 256; pos++) {
-		if (children[pos]) {
-			if (pos == k) {
-				equal = true;
-			} else {
-				equal = false;
-			}
-			return pos;
+		// Free the child and decrease the count.
+		Node::FreeTree(art, n.children[byte]);
+		n.count--;
+
+		if (n.count > SHRINK_THRESHOLD) {
+			return;
 		}
 	}
-	return DConstants::INVALID_INDEX;
+
+	// Shrink to Node48.
+	auto node256 = node;
+	Node48::ShrinkNode256(art, node, node256);
 }
 
-idx_t Node256::GetMin() {
-	for (idx_t i = 0; i < 256; i++) {
-		if (children[i]) {
-			return i;
-		}
-	}
-	return DConstants::INVALID_INDEX;
-}
+void Node256::GrowNode48(ART &art, Node &node256, Node &node48) {
+	{
+		NodeHandle<Node48> n48_handle(art, node48);
+		auto &n48 = n48_handle.Get();
 
-idx_t Node256::GetNextPos(idx_t pos) {
-	for (pos == DConstants::INVALID_INDEX ? pos = 0 : pos++; pos < 256; pos++) {
-		if (children[pos]) {
-			return pos;
-		}
-	}
-	return Node::GetNextPos(pos);
-}
+		auto n256_handle = New(art, node256);
+		auto &n256 = n256_handle.Get();
+		node256.SetGateStatus(node48.GetGateStatus());
 
-Node *Node256::GetChild(ART &art, idx_t pos) {
-	return children[pos].Unswizzle(art);
-}
-
-void Node256::ReplaceChildPointer(idx_t pos, Node *node) {
-	children[pos] = node;
-}
-
-void Node256::InsertChild(Node *&node, uint8_t key_byte, Node *new_child) {
-	auto n = (Node256 *)(node);
-
-	n->count++;
-	n->children[key_byte] = new_child;
-}
-
-void Node256::EraseChild(Node *&node, int pos, ART &art) {
-	auto n = (Node256 *)(node);
-	n->children[pos].Reset();
-	n->count--;
-	if (node->count <= 36) {
-		auto new_node = Node48::New();
-		new_node->prefix = move(n->prefix);
-		for (idx_t i = 0; i < 256; i++) {
-			if (n->children[i]) {
-				new_node->child_index[i] = new_node->count;
-				new_node->children[new_node->count] = n->children[i];
-				n->children[i] = nullptr;
-				new_node->count++;
-			}
-		}
-		Node::Delete(node);
-		node = new_node;
-	}
-}
-
-bool Node256::Merge(MergeInfo &info, idx_t depth, Node *&l_parent, idx_t l_pos) {
-
-	for (idx_t i = 0; i < 256; i++) {
-		if (info.r_node->GetChildPos(i) != DConstants::INVALID_INDEX) {
-
-			auto l_child_pos = info.l_node->GetChildPos(i);
-			auto key_byte = (uint8_t)i;
-			if (!Node::MergeAtByte(info, depth, l_child_pos, i, key_byte, l_parent, l_pos)) {
-				return false;
+		n256.count = n48.count;
+		for (uint16_t i = 0; i < CAPACITY; i++) {
+			if (n48.child_index[i] != Node48::EMPTY_MARKER) {
+				n256.children[i] = n48.children[n48.child_index[i]];
 			}
 		}
 	}
-	return true;
-}
-
-idx_t Node256::GetSize() {
-	return 256;
+	Node::FreeNode(art, node48);
 }
 
 } // namespace duckdb

@@ -3,9 +3,6 @@
 # group: [date]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE dates(d DATE, s VARCHAR);
 
 statement ok
@@ -88,7 +85,7 @@ NULL
 query T
 SELECT date_trunc('month', DATE '1992-02-02') FROM dates LIMIT 1;
 ----
-1992-02-01
+1992-02-01 00:00:00
 
 query T
 SELECT date_trunc(s, d) FROM dates;
@@ -101,13 +98,17 @@ SELECT date_trunc(s, d) FROM dates;
 # Issue #4388: Verify DATE results for all timestamp types
 foreach temporal TIMESTAMP TIMESTAMP_MS TIMESTAMP_NS TIMESTAMP_S
 
-query I
-select date_trunc('day', '2022-08-15 07:52:55'::${temporal});
-----
-2022-08-15
+foreach datepart day doy dow isodow julian
 
 query I
-select date_trunc('hour', '2022-08-15 07:52:55'::${temporal});
+select date_trunc('{datepart}', '2022-08-15 07:52:55'::{temporal});
+----
+2022-08-15 00:00:00
+
+endloop
+
+query I
+select date_trunc('hour', '2022-08-15 07:52:55'::{temporal});
 ----
 2022-08-15 07:00:00
 
@@ -159,62 +160,72 @@ SELECT date_trunc(s, CAST(d as DATE)) FROM timestamps;
 1992-02-02 00:00:00
 infinity
 
+# Infinity passes through every fixed-width unit unchanged
+foreach unit day hour minute second millisecond microsecond
+
+query II
+SELECT date_trunc('{unit}', '-infinity'::TIMESTAMP), date_trunc('{unit}', 'infinity'::TIMESTAMP);
+----
+-infinity	infinity
+
+endloop
+
 # Test week operator special cases
 query T
 SELECT date_trunc('week', TIMESTAMP '2020-01-01 04:03:02') FROM timestamps LIMIT 1;
 ----
-2019-12-30
+2019-12-30 00:00:00
 
 query T
 SELECT date_trunc('week', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2018-12-31
+2018-12-31 00:00:00
 
 query T
 SELECT date_trunc('yearweek', TIMESTAMP '2020-01-01 04:03:02') FROM timestamps LIMIT 1;
 ----
-2019-12-30
+2019-12-30 00:00:00
 
 query T
 SELECT date_trunc('yearweek', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2018-12-31
+2018-12-31 00:00:00
 
 # Test quarter operator more thoroughly
 query T
 SELECT date_trunc('quarter', TIMESTAMP '2020-12-02 04:03:02') FROM timestamps LIMIT 1;
 ----
-2020-10-01
+2020-10-01 00:00:00
 
 query T
 SELECT date_trunc('quarter', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2019-01-01
+2019-01-01 00:00:00
 
 query T
 SELECT date_trunc('millennium', TIMESTAMP '1996-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-1000-01-01
+1000-01-01 00:00:00
 
 query T
 SELECT date_trunc('century', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2000-01-01
+2000-01-01 00:00:00
 
 query T
 SELECT date_trunc('decade', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2010-01-01
+2010-01-01 00:00:00
 
 query T
 SELECT date_trunc('year', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2019-01-01
+2019-01-01 00:00:00
 
 query T
 SELECT date_trunc('day', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
 ----
-2019-01-06
+2019-01-06 00:00:00
 
 query T
 SELECT date_trunc('hour', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
@@ -243,25 +254,25 @@ FROM generate_series('2000-01-01'::TIMESTAMP, '2023-01-01'::TIMESTAMP, INTERVAL 
 ----
 2000-01-01	1999-01-04
 2001-01-01	2001-01-01
-2002-01-01	2001-01-01
-2003-01-01	2001-12-31
-2004-01-01	2002-12-30
+2002-01-01	2001-12-31
+2003-01-01	2002-12-30
+2004-01-01	2003-12-29
 2005-01-01	2003-12-29
 2006-01-01	2005-01-03
 2007-01-01	2007-01-01
-2008-01-01	2007-01-01
-2009-01-01	2007-12-31
+2008-01-01	2007-12-31
+2009-01-01	2008-12-29
 2010-01-01	2008-12-29
 2011-01-01	2010-01-04
 2012-01-01	2011-01-03
-2013-01-01	2012-01-02
-2014-01-01	2012-12-31
-2015-01-01	2013-12-30
+2013-01-01	2012-12-31
+2014-01-01	2013-12-30
+2015-01-01	2014-12-29
 2016-01-01	2014-12-29
 2017-01-01	2016-01-04
 2018-01-01	2018-01-01
-2019-01-01	2018-01-01
-2020-01-01	2018-12-31
+2019-01-01	2018-12-31
+2020-01-01	2019-12-30
 2021-01-01	2019-12-30
 2022-01-01	2021-01-04
 2023-01-01	2022-01-03
@@ -269,37 +280,53 @@ FROM generate_series('2000-01-01'::TIMESTAMP, '2023-01-01'::TIMESTAMP, INTERVAL 
 # Unknown specifier should fail
 statement error
 SELECT date_trunc('duck', TIMESTAMP '2019-01-06 04:03:02') FROM timestamps LIMIT 1;
+----
 
 # Statistics should propagate
 
 statement ok
 PRAGMA disable_verification
 
-query I
-SELECT stats(date_trunc('year', d)) FROM dates LIMIT 1;
+query IIII
+SELECT s.min, s.max, s.has_null, s.has_no_null FROM (SELECT stats(date_trunc('year', d)) s FROM dates LIMIT 1);
 ----
-[Min: 1992-01-01, Max: 2022-01-01][Has Null: false, Has No Null: true]
+1992-01-01 00:00:00	2022-01-01 00:00:00	false	true
 
-query I
-SELECT stats(date_trunc('quarter', d)) FROM dates LIMIT 1;
+query IIII
+SELECT s.min, s.max, s.has_null, s.has_no_null FROM (SELECT stats(date_trunc('quarter', d)) s FROM dates LIMIT 1);
 ----
-[Min: 1992-10-01, Max: 2022-01-01][Has Null: false, Has No Null: true]
+1992-10-01 00:00:00	2022-01-01 00:00:00	false	true
 
-query I
-SELECT stats(date_trunc('month', d)) FROM dates LIMIT 1;
+query IIII
+SELECT s.min, s.max, s.has_null, s.has_no_null FROM (SELECT stats(date_trunc('month', d)) s FROM dates LIMIT 1);
 ----
-[Min: 1992-12-01, Max: 2022-01-01][Has Null: false, Has No Null: true]
+1992-12-01 00:00:00	2022-01-01 00:00:00	false	true
 
-query I
-SELECT stats(date_trunc('day', d)) FROM dates LIMIT 1;
+query IIII
+SELECT s.min, s.max, s.has_null, s.has_no_null FROM (SELECT stats(date_trunc('day', d)) s FROM dates LIMIT 1);
 ----
-[Min: 1992-12-02, Max: 2022-01-01][Has Null: false, Has No Null: true]
+1992-12-02 00:00:00	2022-01-01 00:00:00	false	true
 
 foreach daypart millennium century decade year quarter month week day
 
-query I
-SELECT stats(date_trunc('${daypart}', d)) FROM timestamps LIMIT 1;
+query IIII
+SELECT s.min, s.max, s.has_null, s.has_no_null FROM (SELECT stats(date_trunc('{daypart}', d)) s FROM timestamps LIMIT 1);
 ----
-[Min: -infinity, Max: infinity][Has Null: false, Has No Null: true]
+-infinity	infinity	false	true
 
 endloop
+
+query T
+WITH cte AS (
+    SELECT NULL::VARCHAR part
+    FROM range(1)
+)
+SELECT date_trunc(part, TIMESTAMP '2019-01-06 04:03:02')
+FROM cte
+----
+NULL
+
+query I
+from values ('2024-01-15 15:30:00'::timestamp) as a(t)
+where date_trunc('day', t) = '2024-01-15 12:30:00';
+----

@@ -1,19 +1,27 @@
 #include "duckdb/execution/expression_executor_state.hpp"
+
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
 
-void ExpressionState::AddChild(Expression *expr) {
-	types.push_back(expr->return_type);
-	child_states.push_back(ExpressionExecutor::InitializeState(*expr, root));
+void ExpressionState::AddChild(const Expression &child_expr) {
+	types.push_back(child_expr.GetReturnType());
+	auto child_state = ExpressionExecutor::InitializeState(child_expr, root);
+	child_states.push_back(std::move(child_state));
+
+	auto expr_class = child_expr.GetExpressionClass();
+	auto initialize_child = expr_class != ExpressionClass::BOUND_REF && expr_class != ExpressionClass::BOUND_CONSTANT &&
+	                        expr_class != ExpressionClass::BOUND_PARAMETER;
+	initialize.push_back(initialize_child);
 }
 
 void ExpressionState::Finalize() {
-	if (!types.empty()) {
-		intermediate_chunk.Initialize(GetAllocator(), types);
+	if (types.empty()) {
+		return;
 	}
+	intermediate_chunk.Initialize(GetAllocator(), types, initialize);
 }
 
 Allocator &ExpressionState::GetAllocator() {
@@ -26,22 +34,28 @@ bool ExpressionState::HasContext() {
 
 ClientContext &ExpressionState::GetContext() {
 	if (!HasContext()) {
-		throw BinderException("Cannot use %s in this context", ((BoundFunctionExpression &)expr).function.name);
+		throw BinderException("Cannot use %s in this context",
+		                      (expr.Cast<BoundFunctionExpression>()).Function().GetName());
 	}
 	return root.executor->GetContext();
 }
 
-ExpressionState::ExpressionState(const Expression &expr, ExpressionExecutorState &root)
-    : expr(expr), root(root), name(expr.ToString()) {
+ExpressionState::ExpressionState(const Expression &expr, ExpressionExecutorState &root) : expr(expr), root(root) {
 }
 
-ExpressionExecutorState::ExpressionExecutorState(const string &name) : profiler(), name(name) {
+ExpressionExecutorState::ExpressionExecutorState() {
 }
 
 void ExpressionState::Verify(ExpressionExecutorState &root_executor) {
 	D_ASSERT(&root_executor == &root);
 	for (auto &entry : child_states) {
 		entry->Verify(root_executor);
+	}
+}
+
+void ExpressionState::ResetDictionaryStates() {
+	for (const auto &child : child_states) {
+		child->ResetDictionaryStates();
 	}
 }
 

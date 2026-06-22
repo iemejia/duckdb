@@ -3,7 +3,7 @@
 # group: [rle]
 
 # load the DB from disk
-load __TEST_DIR__/test_rle.db
+load {TEST_DIR}/test_rle.db
 
 statement ok
 PRAGMA force_compression = 'rle'
@@ -13,6 +13,9 @@ CREATE TABLE test (a INTEGER, b INTEGER);
 
 statement ok
 INSERT INTO test VALUES (11, 22), (11, 22), (12, 21), (NULL, NULL)
+
+statement ok
+CHECKPOINT
 
 query I
 SELECT compression FROM pragma_storage_info('test') WHERE segment_type ILIKE 'INTEGER' LIMIT 1

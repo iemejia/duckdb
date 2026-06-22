@@ -1,6 +1,7 @@
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 
 namespace duckdb {
 
@@ -13,34 +14,45 @@ public:
 	ExpressionExecutor executor;
 
 public:
-	void Finalize(PhysicalOperator *op, ExecutionContext &context) override {
-		context.thread.profiler.Flush(op, &executor, "projection", 0);
+	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
+		context.thread.profiler.Flush(op);
+	}
+
+	bool SupportsReuse() const override {
+		return true;
 	}
 };
 
-PhysicalProjection::PhysicalProjection(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
-                                       idx_t estimated_cardinality)
-    : PhysicalOperator(PhysicalOperatorType::PROJECTION, move(types), estimated_cardinality),
-      select_list(move(select_list)) {
+PhysicalProjection::PhysicalProjection(PhysicalPlan &physical_plan, vector<LogicalType> types,
+                                       vector<unique_ptr<Expression>> select_list, idx_t estimated_cardinality)
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::PROJECTION, std::move(types), estimated_cardinality),
+      select_list(std::move(select_list)) {
 }
 
 OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                GlobalOperatorState &gstate, OperatorState &state_p) const {
-	auto &state = (ProjectionState &)state_p;
+	auto &state = state_p.Cast<ProjectionState>();
 	state.executor.Execute(input, chunk);
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
 unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ExecutionContext &context) const {
-	return make_unique<ProjectionState>(context, select_list);
+	return make_uniq<ProjectionState>(context, select_list);
 }
 
-string PhysicalProjection::ParamsToString() const {
-	string extra_info;
-	for (auto &expr : select_list) {
-		extra_info += expr->GetName() + "\n";
+InsertionOrderPreservingMap<string> PhysicalProjection::ParamsToString() const {
+	InsertionOrderPreservingMap<string> result;
+	string projections;
+	for (idx_t i = 0; i < select_list.size(); i++) {
+		if (i > 0) {
+			projections += "\n";
+		}
+		auto &expr = select_list[i];
+		projections += expr->GetName();
 	}
-	return extra_info;
+	result["__projections__"] = projections;
+	SetEstimatedCardinality(result, estimated_cardinality);
+	return result;
 }
 
 } // namespace duckdb

@@ -2,9 +2,6 @@
 # description: Usage of valid generated columns that do not reference any columns
 # group: [virtual]
 
-statement ok
-PRAGMA enable_verification
-
 # Aggregate functions are not supported here
 statement error
 CREATE TABLE tbl (
@@ -12,6 +9,7 @@ CREATE TABLE tbl (
 	amount_sold INTEGER,
 	gcol AS (list(5,4,3))
 );
+----
 
 statement ok
 CREATE TABLE tbl (

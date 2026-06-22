@@ -1,43 +1,53 @@
 #include "duckdb/storage/checkpoint/table_data_writer.hpp"
-
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
-#include "duckdb/common/serializer/buffered_serializer.hpp"
 #include "duckdb/storage/table/column_checkpoint_state.hpp"
+#include "duckdb/common/serializer/binary_serializer.hpp"
 
 namespace duckdb {
 
-CompressionType RowGroupWriter::GetColumnCompressionType(idx_t i) {
-	return table.columns.GetColumn(LogicalIndex(i)).CompressionType();
-}
-
-void RowGroupWriter::RegisterPartialBlock(PartialBlockAllocation &&allocation) {
-	partial_block_manager.RegisterPartialBlock(move(allocation));
-}
-
-PartialBlockAllocation RowGroupWriter::GetBlockAllocation(uint32_t segment_size) {
-	return partial_block_manager.GetBlockAllocation(segment_size);
-}
-
-void SingleFileRowGroupWriter::WriteColumnDataPointers(ColumnCheckpointState &column_checkpoint_state) {
-	auto &meta_writer = table_data_writer;
-	const auto &data_pointers = column_checkpoint_state.data_pointers;
-
-	meta_writer.Write<idx_t>(data_pointers.size());
-	// then write the data pointers themselves
-	for (idx_t k = 0; k < data_pointers.size(); k++) {
-		auto &data_pointer = data_pointers[k];
-		meta_writer.Write<idx_t>(data_pointer.row_start);
-		meta_writer.Write<idx_t>(data_pointer.tuple_count);
-		meta_writer.Write<block_id_t>(data_pointer.block_pointer.block_id);
-		meta_writer.Write<uint32_t>(data_pointer.block_pointer.offset);
-		meta_writer.Write<CompressionType>(data_pointer.compression_type);
-		data_pointer.statistics->Serialize(meta_writer);
+RowGroupWriter::RowGroupWriter(TableDataWriter &writer, TableCatalogEntry &table,
+                               PartialBlockManager &partial_block_manager)
+    : writer(writer), table(table), partial_block_manager(partial_block_manager) {
+	for (auto &col : table.GetColumns().Physical()) {
+		compression_types.push_back(col.CompressionType());
 	}
 }
 
-MetaBlockWriter &SingleFileRowGroupWriter::GetPayloadWriter() {
+DatabaseInstance &RowGroupWriter::GetDatabase() {
+	return table.ParentCatalog().GetDatabase();
+}
+
+AttachedDatabase &RowGroupWriter::GetAttachedDatabase() {
+	return table.ParentCatalog().GetAttached();
+}
+
+SingleFileRowGroupWriter::SingleFileRowGroupWriter(TableCatalogEntry &table, PartialBlockManager &partial_block_manager,
+                                                   TableDataWriter &writer, MetadataWriter &table_data_writer)
+    : RowGroupWriter(writer, table, partial_block_manager), table_data_writer(table_data_writer) {
+}
+
+CheckpointOptions SingleFileRowGroupWriter::GetCheckpointOptions() const {
+	return writer.GetCheckpointOptions();
+}
+
+WriteStream &SingleFileRowGroupWriter::GetPayloadWriter() {
 	return table_data_writer;
+}
+
+MetaBlockPointer SingleFileRowGroupWriter::GetMetaBlockPointer() {
+	return table_data_writer.GetMetaBlockPointer();
+}
+
+optional_ptr<MetadataManager> SingleFileRowGroupWriter::GetMetadataManager() {
+	return table_data_writer.GetManager();
+}
+
+void SingleFileRowGroupWriter::StartWritingColumns(vector<MetaBlockPointer> &column_metadata) {
+	table_data_writer.SetWrittenPointers(column_metadata);
+}
+
+void SingleFileRowGroupWriter::FinishWritingColumns() {
+	table_data_writer.SetWrittenPointers(nullptr);
 }
 
 } // namespace duckdb

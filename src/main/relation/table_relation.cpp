@@ -3,31 +3,38 @@
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/main/relation/delete_relation.hpp"
+#include "duckdb/main/relation/value_relation.hpp"
 #include "duckdb/main/relation/update_relation.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
-TableRelation::TableRelation(const std::shared_ptr<ClientContext> &context, unique_ptr<TableDescription> description)
-    : Relation(context, RelationType::TABLE_RELATION), description(move(description)) {
+TableRelation::TableRelation(const shared_ptr<ClientContext> &context, unique_ptr<TableDescription> description)
+    : Relation(context, RelationType::TABLE_RELATION), description(std::move(description)) {
+}
+
+TableRelation::TableRelation(const shared_ptr<RelationContextWrapper> &context,
+                             unique_ptr<TableDescription> description)
+    : Relation(context, RelationType::TABLE_RELATION), description(std::move(description)) {
 }
 
 unique_ptr<QueryNode> TableRelation::GetQueryNode() {
-	auto result = make_unique<SelectNode>();
-	result->select_list.push_back(make_unique<StarExpression>());
+	auto result = make_uniq<SelectNode>();
+	result->select_list.push_back(make_uniq<StarExpression>());
 	result->from_table = GetTableRef();
-	return move(result);
+	return std::move(result);
 }
 
 unique_ptr<TableRef> TableRelation::GetTableRef() {
-	auto table_ref = make_unique<BaseTableRef>();
+	auto table_ref = make_uniq<BaseTableRef>();
 	table_ref->schema_name = description->schema;
 	table_ref->table_name = description->table;
-	return move(table_ref);
+	table_ref->catalog_name = description->database;
+	return std::move(table_ref);
 }
 
-string TableRelation::GetAlias() {
+Identifier TableRelation::GetAlias() {
 	return description->table;
 }
 
@@ -36,7 +43,8 @@ const vector<ColumnDefinition> &TableRelation::Columns() {
 }
 
 string TableRelation::ToString(idx_t depth) {
-	return RenderWhitespace(depth) + "Scan Table [" + description->table + "]";
+	return RenderWhitespace(depth) + "Scan Table [" +
+	       ParseInfo::QualifierToString(description->database, description->schema, description->table) + "]";
 }
 
 static unique_ptr<ParsedExpression> ParseCondition(ClientContext &context, const string &condition) {
@@ -45,26 +53,52 @@ static unique_ptr<ParsedExpression> ParseCondition(ClientContext &context, const
 		if (expression_list.size() != 1) {
 			throw ParserException("Expected a single expression as filter condition");
 		}
-		return move(expression_list[0]);
+		return std::move(expression_list[0]);
 	} else {
 		return nullptr;
 	}
 }
 
+void TableRelation::Update(vector<string> names, vector<unique_ptr<ParsedExpression>> &&update,
+                           unique_ptr<ParsedExpression> condition) {
+	vector<Identifier> update_columns = StringsToIdentifiers(names);
+	vector<unique_ptr<ParsedExpression>> expressions = std::move(update);
+
+	auto update_relation =
+	    make_shared_ptr<UpdateRelation>(context, std::move(condition), description->database, description->schema,
+	                                    description->table, std::move(update_columns), std::move(expressions));
+	update_relation->Execute();
+}
+
 void TableRelation::Update(const string &update_list, const string &condition) {
-	vector<string> update_columns;
+	vector<Identifier> update_columns;
 	vector<unique_ptr<ParsedExpression>> expressions;
-	auto cond = ParseCondition(*context.GetContext(), condition);
-	Parser::ParseUpdateList(update_list, update_columns, expressions, context.GetContext()->GetParserOptions());
-	auto update = make_shared<UpdateRelation>(context, move(cond), description->schema, description->table,
-	                                          move(update_columns), move(expressions));
+	auto cond = ParseCondition(*context->GetContext(), condition);
+	Parser::ParseUpdateList(update_list, update_columns, expressions, context->GetContext()->GetParserOptions());
+	auto update =
+	    make_shared_ptr<UpdateRelation>(context, std::move(cond), description->database, description->schema,
+	                                    description->table, std::move(update_columns), std::move(expressions));
 	update->Execute();
 }
 
 void TableRelation::Delete(const string &condition) {
-	auto cond = ParseCondition(*context.GetContext(), condition);
-	auto del = make_shared<DeleteRelation>(context, move(cond), description->schema, description->table);
+	auto cond = ParseCondition(*context->GetContext(), condition);
+	auto del = make_shared_ptr<DeleteRelation>(context, std::move(cond), description->database, description->schema,
+	                                           description->table);
 	del->Execute();
+}
+
+void TableRelation::Insert(const vector<vector<Value>> &values) {
+	vector<string> column_names;
+	auto rel = make_shared_ptr<ValueRelation>(context->GetContext(), values, std::move(column_names), "values");
+	rel->Insert(description->database, description->schema, description->table);
+}
+
+void TableRelation::Insert(vector<vector<unique_ptr<ParsedExpression>>> &&expressions) {
+	vector<string> column_names;
+	auto rel = make_shared_ptr<ValueRelation>(context->GetContext(), std::move(expressions), std::move(column_names),
+	                                          "values");
+	rel->Insert(description->database, description->schema, description->table);
 }
 
 } // namespace duckdb

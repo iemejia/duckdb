@@ -11,15 +11,13 @@
 #pragma once
 
 #include <memory>
-#include <string>
-#include <vector>
 #include "benchmark_configuration.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/common/string.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/unique_ptr.hpp"
 
 namespace duckdb {
-
-using std::string;
-using std::unique_ptr;
-using std::vector;
 
 //! Base class for any state that has to be kept by a Benchmark
 struct BenchmarkState {
@@ -31,8 +29,6 @@ struct BenchmarkState {
 //! new benchmarks
 class Benchmark {
 	constexpr static size_t DEFAULT_NRUNS = 5;
-	constexpr static size_t DEFAULT_TIMEOUT = 30;
-
 	Benchmark(Benchmark &) = delete;
 
 public:
@@ -44,9 +40,11 @@ public:
 	Benchmark(bool register_benchmark, string name, string group);
 
 	//! Initialize the benchmark state
-	virtual unique_ptr<BenchmarkState> Initialize(BenchmarkConfiguration &config) {
+	virtual duckdb::unique_ptr<BenchmarkState> Initialize(BenchmarkConfiguration &config) {
 		return nullptr;
 	}
+	//! Assert correctness after load, before run
+	virtual void Assert(BenchmarkState *state) {};
 	//! Run the benchmark
 	virtual void Run(BenchmarkState *state) = 0;
 	//! Cleanup the benchmark, called after each Run
@@ -89,8 +87,8 @@ public:
 		return DEFAULT_NRUNS;
 	}
 	//! The timeout for this benchmark (in seconds)
-	virtual size_t Timeout() {
-		return DEFAULT_TIMEOUT;
+	virtual optional_idx Timeout(const BenchmarkConfiguration &config) {
+		return config.timeout_duration;
 	}
 };
 

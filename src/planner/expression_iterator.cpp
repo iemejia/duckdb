@@ -1,11 +1,8 @@
 #include "duckdb/planner/expression_iterator.hpp"
 
-#include "duckdb/planner/bound_query_node.hpp"
 #include "duckdb/planner/expression/list.hpp"
-#include "duckdb/planner/query_node/bound_select_node.hpp"
-#include "duckdb/planner/query_node/bound_set_operation_node.hpp"
-#include "duckdb/planner/query_node/bound_recursive_cte_node.hpp"
 #include "duckdb/planner/tableref/list.hpp"
+#include "duckdb/common/enum_util.hpp"
 
 namespace duckdb {
 
@@ -20,106 +17,96 @@ void ExpressionIterator::EnumerateChildren(Expression &expr, const std::function
 
 void ExpressionIterator::EnumerateChildren(Expression &expr,
                                            const std::function<void(unique_ptr<Expression> &child)> &callback) {
-	switch (expr.expression_class) {
+	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_AGGREGATE: {
-		auto &aggr_expr = (BoundAggregateExpression &)expr;
-		for (auto &child : aggr_expr.children) {
+		auto &aggr_expr = expr.Cast<BoundAggregateExpression>();
+		for (auto &child : aggr_expr.GetChildrenMutable()) {
 			callback(child);
 		}
-		if (aggr_expr.filter) {
-			callback(aggr_expr.filter);
+		if (aggr_expr.GetFilter()) {
+			callback(aggr_expr.GetFilterMutable());
 		}
-		break;
-	}
-	case ExpressionClass::BOUND_BETWEEN: {
-		auto &between_expr = (BoundBetweenExpression &)expr;
-		callback(between_expr.input);
-		callback(between_expr.lower);
-		callback(between_expr.upper);
+		if (aggr_expr.GetOrderBys()) {
+			for (auto &order : aggr_expr.GetOrderBysMutable()->orders) {
+				callback(order.expression);
+			}
+		}
 		break;
 	}
 	case ExpressionClass::BOUND_CASE: {
-		auto &case_expr = (BoundCaseExpression &)expr;
-		for (auto &case_check : case_expr.case_checks) {
+		auto &case_expr = expr.Cast<BoundCaseExpression>();
+		for (auto &case_check : case_expr.CaseChecksMutable()) {
 			callback(case_check.when_expr);
 			callback(case_check.then_expr);
 		}
-		callback(case_expr.else_expr);
+		callback(case_expr.ElseMutable());
 		break;
 	}
 	case ExpressionClass::BOUND_CAST: {
-		auto &cast_expr = (BoundCastExpression &)expr;
-		callback(cast_expr.child);
-		break;
-	}
-	case ExpressionClass::BOUND_COMPARISON: {
-		auto &comp_expr = (BoundComparisonExpression &)expr;
-		callback(comp_expr.left);
-		callback(comp_expr.right);
+		auto &cast_expr = expr.Cast<BoundCastExpression>();
+		callback(cast_expr.ChildMutable());
 		break;
 	}
 	case ExpressionClass::BOUND_CONJUNCTION: {
-		auto &conj_expr = (BoundConjunctionExpression &)expr;
-		for (auto &child : conj_expr.children) {
+		auto &conj_expr = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conj_expr.GetChildrenMutable()) {
 			callback(child);
 		}
 		break;
 	}
 	case ExpressionClass::BOUND_FUNCTION: {
-		auto &func_expr = (BoundFunctionExpression &)expr;
-		for (auto &child : func_expr.children) {
+		auto &func_expr = expr.Cast<BoundFunctionExpression>();
+		for (auto &child : func_expr.GetChildrenMutable()) {
 			callback(child);
 		}
 		break;
 	}
 	case ExpressionClass::BOUND_OPERATOR: {
-		auto &op_expr = (BoundOperatorExpression &)expr;
-		for (auto &child : op_expr.children) {
+		auto &op_expr = expr.Cast<BoundOperatorExpression>();
+		for (auto &child : op_expr.GetChildrenMutable()) {
 			callback(child);
 		}
 		break;
 	}
 	case ExpressionClass::BOUND_SUBQUERY: {
-		auto &subquery_expr = (BoundSubqueryExpression &)expr;
-		if (subquery_expr.child) {
-			callback(subquery_expr.child);
+		auto &subquery_expr = expr.Cast<BoundSubqueryExpression>();
+		for (auto &child : subquery_expr.GetChildrenMutable()) {
+			callback(child);
 		}
 		break;
 	}
 	case ExpressionClass::BOUND_WINDOW: {
-		auto &window_expr = (BoundWindowExpression &)expr;
-		for (auto &partition : window_expr.partitions) {
+		auto &window_expr = expr.Cast<BoundWindowExpression>();
+		for (auto &partition : window_expr.PartitionsMutable()) {
 			callback(partition);
 		}
-		for (auto &order : window_expr.orders) {
+		for (auto &order : window_expr.OrderByMutable()) {
 			callback(order.expression);
 		}
-		for (auto &child : window_expr.children) {
+		for (auto &child : window_expr.GetChildrenMutable()) {
 			callback(child);
 		}
-		if (window_expr.filter_expr) {
-			callback(window_expr.filter_expr);
+		if (window_expr.FilterMutable()) {
+			callback(window_expr.FilterMutable());
 		}
-		if (window_expr.start_expr) {
-			callback(window_expr.start_expr);
+		if (window_expr.StartExprMutable()) {
+			callback(window_expr.StartExprMutable());
 		}
-		if (window_expr.end_expr) {
-			callback(window_expr.end_expr);
+		if (window_expr.EndExprMutable()) {
+			callback(window_expr.EndExprMutable());
 		}
-		if (window_expr.offset_expr) {
-			callback(window_expr.offset_expr);
-		}
-		if (window_expr.default_expr) {
-			callback(window_expr.default_expr);
+		for (auto &order : window_expr.ArgOrdersMutable()) {
+			callback(order.expression);
 		}
 		break;
 	}
 	case ExpressionClass::BOUND_UNNEST: {
-		auto &unnest_expr = (BoundUnnestExpression &)expr;
-		callback(unnest_expr.child);
+		auto &unnest_expr = expr.Cast<BoundUnnestExpression>();
+		callback(unnest_expr.ChildMutable());
 		break;
 	}
 	case ExpressionClass::BOUND_COLUMN_REF:
+	case ExpressionClass::BOUND_LAMBDA_REF:
 	case ExpressionClass::BOUND_CONSTANT:
 	case ExpressionClass::BOUND_DEFAULT:
 	case ExpressionClass::BOUND_PARAMETER:
@@ -141,104 +128,35 @@ void ExpressionIterator::EnumerateExpression(unique_ptr<Expression> &expr,
 	                                      [&](unique_ptr<Expression> &child) { EnumerateExpression(child, callback); });
 }
 
-void ExpressionIterator::EnumerateTableRefChildren(BoundTableRef &ref,
-                                                   const std::function<void(Expression &child)> &callback) {
-	switch (ref.type) {
-	case TableReferenceType::CROSS_PRODUCT: {
-		auto &bound_crossproduct = (BoundCrossProductRef &)ref;
-		EnumerateTableRefChildren(*bound_crossproduct.left, callback);
-		EnumerateTableRefChildren(*bound_crossproduct.right, callback);
-		break;
+void ExpressionIterator::EnumerateExpression(unique_ptr<Expression> &expr,
+                                             const std::function<void(unique_ptr<Expression> &child)> &callback) {
+	if (!expr) {
+		return;
 	}
-	case TableReferenceType::EXPRESSION_LIST: {
-		auto &bound_expr_list = (BoundExpressionListRef &)ref;
-		for (auto &expr_list : bound_expr_list.values) {
-			for (auto &expr : expr_list) {
-				EnumerateExpression(expr, callback);
-			}
-		}
-		break;
-	}
-	case TableReferenceType::JOIN: {
-		auto &bound_join = (BoundJoinRef &)ref;
-		EnumerateExpression(bound_join.condition, callback);
-		EnumerateTableRefChildren(*bound_join.left, callback);
-		EnumerateTableRefChildren(*bound_join.right, callback);
-		break;
-	}
-	case TableReferenceType::SUBQUERY: {
-		auto &bound_subquery = (BoundSubqueryRef &)ref;
-		EnumerateQueryNodeChildren(*bound_subquery.subquery, callback);
-		break;
-	}
-	case TableReferenceType::TABLE_FUNCTION:
-	case TableReferenceType::EMPTY:
-	case TableReferenceType::BASE_TABLE:
-	case TableReferenceType::CTE:
-		break;
-	default:
-		throw NotImplementedException("Unimplemented table reference type in ExpressionIterator");
-	}
+	callback(expr);
+	ExpressionIterator::EnumerateChildren(*expr,
+	                                      [&](unique_ptr<Expression> &child) { EnumerateExpression(child, callback); });
 }
 
-void ExpressionIterator::EnumerateQueryNodeChildren(BoundQueryNode &node,
-                                                    const std::function<void(Expression &child)> &callback) {
-	switch (node.type) {
-	case QueryNodeType::SET_OPERATION_NODE: {
-		auto &bound_setop = (BoundSetOperationNode &)node;
-		EnumerateQueryNodeChildren(*bound_setop.left, callback);
-		EnumerateQueryNodeChildren(*bound_setop.right, callback);
-		break;
+void ExpressionIterator::VisitExpressionClass(const Expression &expr, ExpressionClass expr_class,
+                                              const std::function<void(const Expression &child)> &callback) {
+	if (expr.GetExpressionClass() == expr_class) {
+		callback(expr);
+		return;
 	}
-	case QueryNodeType::RECURSIVE_CTE_NODE: {
-		auto &cte_node = (BoundRecursiveCTENode &)node;
-		EnumerateQueryNodeChildren(*cte_node.left, callback);
-		EnumerateQueryNodeChildren(*cte_node.right, callback);
-		break;
+	ExpressionIterator::EnumerateChildren(
+	    expr, [&](const Expression &child) { VisitExpressionClass(child, expr_class, callback); });
+}
+
+void ExpressionIterator::VisitExpressionClassMutable(
+    unique_ptr<Expression> &expr, ExpressionClass expr_class,
+    const std::function<void(unique_ptr<Expression> &child)> &callback) {
+	if (expr->GetExpressionClass() == expr_class) {
+		callback(expr);
+		return;
 	}
-	case QueryNodeType::SELECT_NODE: {
-		auto &bound_select = (BoundSelectNode &)node;
-		for (idx_t i = 0; i < bound_select.select_list.size(); i++) {
-			EnumerateExpression(bound_select.select_list[i], callback);
-		}
-		EnumerateExpression(bound_select.where_clause, callback);
-		for (idx_t i = 0; i < bound_select.groups.group_expressions.size(); i++) {
-			EnumerateExpression(bound_select.groups.group_expressions[i], callback);
-		}
-		EnumerateExpression(bound_select.having, callback);
-		for (idx_t i = 0; i < bound_select.aggregates.size(); i++) {
-			EnumerateExpression(bound_select.aggregates[i], callback);
-		}
-		for (idx_t i = 0; i < bound_select.unnests.size(); i++) {
-			EnumerateExpression(bound_select.unnests[i], callback);
-		}
-		for (idx_t i = 0; i < bound_select.windows.size(); i++) {
-			EnumerateExpression(bound_select.windows[i], callback);
-		}
-		if (bound_select.from_table) {
-			EnumerateTableRefChildren(*bound_select.from_table, callback);
-		}
-		break;
-	}
-	default:
-		throw NotImplementedException("Unimplemented query node in ExpressionIterator");
-	}
-	for (idx_t i = 0; i < node.modifiers.size(); i++) {
-		switch (node.modifiers[i]->type) {
-		case ResultModifierType::DISTINCT_MODIFIER:
-			for (auto &expr : ((BoundDistinctModifier &)*node.modifiers[i]).target_distincts) {
-				EnumerateExpression(expr, callback);
-			}
-			break;
-		case ResultModifierType::ORDER_MODIFIER:
-			for (auto &order : ((BoundOrderModifier &)*node.modifiers[i]).orders) {
-				EnumerateExpression(order.expression, callback);
-			}
-			break;
-		default:
-			break;
-		}
-	}
+	ExpressionIterator::EnumerateChildren(
+	    *expr, [&](unique_ptr<Expression> &child) { VisitExpressionClassMutable(child, expr_class, callback); });
 }
 
 } // namespace duckdb

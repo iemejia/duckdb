@@ -12,38 +12,30 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/parsed_data/create_sequence_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/common/optional.hpp"
 
 namespace duckdb {
-class Serializer;
-class Deserializer;
+class DuckTransaction;
+class SequenceCatalogEntry;
 
 struct SequenceValue {
-	SequenceValue() : usage_count(0), counter(-1) {
-	}
-	SequenceValue(uint64_t usage_count, int64_t counter) : usage_count(usage_count), counter(counter) {
-	}
-
+	SequenceCatalogEntry *entry;
 	uint64_t usage_count;
 	int64_t counter;
 };
 
-//! A sequence catalog entry
-class SequenceCatalogEntry : public StandardEntry {
-public:
-	//! Create a real TableCatalogEntry and initialize storage for it
-	SequenceCatalogEntry(Catalog *catalog, SchemaCatalogEntry *schema, CreateSequenceInfo *info);
+struct SequenceData {
+	explicit SequenceData(CreateSequenceInfo &info);
 
-	//! Lock for getting a value on the sequence
-	mutex lock;
 	//! The amount of times the sequence has been used
 	uint64_t usage_count;
 	//! The sequence counter
 	int64_t counter;
 	//! The most recently returned value
-	int64_t last_value;
+	optional<int64_t> last_value;
 	//! The increment value
 	int64_t increment;
-	//! The minimum value of the sequence
+	//! The start_value of the sequence
 	int64_t start_value;
 	//! The minimum value of the sequence
 	int64_t min_value;
@@ -51,15 +43,33 @@ public:
 	int64_t max_value;
 	//! Whether or not the sequence cycles
 	bool cycle;
+};
+
+//! A sequence catalog entry
+class SequenceCatalogEntry : public StandardEntry {
+public:
+	static constexpr const CatalogType Type = CatalogType::SEQUENCE_ENTRY;
+	static constexpr const char *Name = "sequence";
 
 public:
-	//! Serialize the meta information of the SequenceCatalogEntry a serializer
-	virtual void Serialize(Serializer &serializer);
-	//! Deserializes to a CreateTableInfo
-	static unique_ptr<CreateSequenceInfo> Deserialize(Deserializer &source);
+	//! Create a real TableCatalogEntry and initialize storage for it
+	SequenceCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateSequenceInfo &info);
 
-	string ToSQL() override;
+public:
+	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
+	unique_ptr<CreateInfo> GetInfo() const override;
 
-	CatalogEntry *AlterOwnership(ClientContext &context, AlterInfo *info);
+	SequenceData GetData() const;
+	int64_t CurrentValue();
+	int64_t NextValue(DuckTransaction &transaction);
+	void ReplayValue(uint64_t usage_count, int64_t counter, optional<int64_t> last_value);
+
+	string ToSQL() const override;
+
+private:
+	//! Lock for getting a value on the sequence
+	mutable mutex lock;
+	//! Sequence data
+	SequenceData data;
 };
 } // namespace duckdb

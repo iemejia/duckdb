@@ -48,16 +48,26 @@ function get_extra_data(bind_info::BindInfo)
 end
 
 function _add_global_object(main_function, object)
-    lock(main_function.global_lock)
-    push!(main_function.global_objects, object)
-    unlock(main_function.global_lock)
+    begin
+        lock(main_function.global_lock)
+        try
+            push!(main_function.global_objects, object)
+        finally
+            unlock(main_function.global_lock)
+        end
+    end
     return
 end
 
 function _remove_global_object(main_function, object)
-    lock(main_function.global_lock)
-    delete!(main_function.global_objects, object)
-    unlock(main_function.global_lock)
+    begin
+        lock(main_function.global_lock)
+        try
+            delete!(main_function.global_objects, object)
+        finally
+            unlock(main_function.global_lock)
+        end
+    end
     return
 end
 
@@ -69,14 +79,8 @@ end
 
 function get_exception_info()
     error = ""
-    if VERSION < v"1.7"
-        for (exc, bt) in Base.catch_stack()
-            error = string(error, sprint(showerror, exc, bt))
-        end
-    else
-        for (exc, bt) in current_exceptions()
-            error = string(error, sprint(showerror, exc, bt))
-        end
+    for (exc, bt) in current_exceptions()
+        error = string(error, sprint(showerror, exc, bt))
     end
     return error
 end
@@ -235,7 +239,7 @@ mutable struct TableFunction
         result = new(handle, bind_func, init_func, init_local_func, main_func, extra_data, Set(), ReentrantLock())
         finalizer(_destroy_table_function, result)
 
-        duckdb_table_function_set_extra_info(handle, pointer_from_objref(result))
+        duckdb_table_function_set_extra_info(handle, pointer_from_objref(result), C_NULL)
         duckdb_table_function_set_bind(handle, @cfunction(_table_bind_function, Cvoid, (duckdb_bind_info,)))
         duckdb_table_function_set_init(handle, @cfunction(_table_init_function, Cvoid, (duckdb_init_info,)))
         duckdb_table_function_set_local_init(handle, @cfunction(_table_local_init_function, Cvoid, (duckdb_init_info,)))

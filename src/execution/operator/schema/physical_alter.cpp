@@ -1,5 +1,7 @@
 #include "duckdb/execution/operator/schema/physical_alter.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/parser/parsed_data/alter_database_info.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/catalog/catalog.hpp"
 
 namespace duckdb {
@@ -7,27 +9,17 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Source
 //===--------------------------------------------------------------------===//
-class AlterSourceState : public GlobalSourceState {
-public:
-	AlterSourceState() : finished(false) {
+SourceResultType PhysicalAlter::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                OperatorSourceInput &input) const {
+	if (info->type == AlterType::ALTER_DATABASE) {
+		auto &db_info = info->Cast<AlterDatabaseInfo>();
+		auto &db_manager = DatabaseManager::Get(context.client);
+		db_manager.Alter(context.client, db_info);
+	} else {
+		auto &catalog = Catalog::GetCatalog(context.client, info->catalog);
+		catalog.Alter(context.client, *info);
 	}
-
-	bool finished;
-};
-
-unique_ptr<GlobalSourceState> PhysicalAlter::GetGlobalSourceState(ClientContext &context) const {
-	return make_unique<AlterSourceState>();
-}
-
-void PhysicalAlter::GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-                            LocalSourceState &lstate) const {
-	auto &state = (AlterSourceState &)gstate;
-	if (state.finished) {
-		return;
-	}
-	auto &catalog = Catalog::GetCatalog(context.client);
-	catalog.Alter(context.client, info.get());
-	state.finished = true;
+	return SourceResultType::FINISHED;
 }
 
 } // namespace duckdb

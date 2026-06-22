@@ -2,7 +2,7 @@
 # description: Use sequences over different runs
 # group: [wal]
 
-load __TEST_DIR__/store_sequences.db
+load {TEST_DIR}/store_sequences.db
 
 statement ok
 PRAGMA disable_checkpoint_on_shutdown
@@ -55,6 +55,7 @@ SELECT nextval('seq_cycle')
 
 statement error
 SELECT nextval('seq2')
+----
 
 # again
 restart
@@ -78,6 +79,7 @@ restart
 # verify that sequence is gone
 statement error
 SELECT nextval('seq')
+----
 
 # other sequence is still there
 statement ok

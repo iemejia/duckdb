@@ -10,8 +10,12 @@
 
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/type_util.hpp"
+#include "duckdb/common/types/cast_helpers.hpp"
 
 namespace duckdb {
+
+struct interval_t;
 
 struct MultiplyOperator {
 	template <class TA, class TB, class TR>
@@ -28,6 +32,10 @@ template <>
 interval_t MultiplyOperator::Operation(interval_t left, int64_t right);
 template <>
 interval_t MultiplyOperator::Operation(int64_t left, interval_t right);
+template <>
+interval_t MultiplyOperator::Operation(interval_t left, double right);
+template <>
+interval_t MultiplyOperator::Operation(double left, interval_t right);
 
 struct TryMultiplyOperator {
 	template <class TA, class TB, class TR>
@@ -53,14 +61,21 @@ template <>
 bool TryMultiplyOperator::Operation(int32_t left, int32_t right, int32_t &result);
 template <>
 DUCKDB_API bool TryMultiplyOperator::Operation(int64_t left, int64_t right, int64_t &result);
+template <>
+DUCKDB_API bool TryMultiplyOperator::Operation(hugeint_t left, hugeint_t right, hugeint_t &result);
+template <>
+DUCKDB_API bool TryMultiplyOperator::Operation(uhugeint_t left, uhugeint_t right, uhugeint_t &result);
+
+template <>
+bool TryMultiplyOperator::Operation(interval_t left, double right, interval_t &result);
 
 struct MultiplyOperatorOverflowCheck {
 	template <class TA, class TB, class TR>
 	static inline TR Operation(TA left, TB right) {
 		TR result;
 		if (!TryMultiplyOperator::Operation(left, right, result)) {
-			throw OutOfRangeException("Overflow in multiplication of %s (%d * %d)!", TypeIdToString(GetTypeId<TA>()),
-			                          left, right);
+			throw OutOfRangeException("Overflow in multiplication of %s (%s * %s)!", TypeIdToString(GetTypeId<TA>()),
+			                          NumericHelper::ToString(left), NumericHelper::ToString(right));
 		}
 		return result;
 	}

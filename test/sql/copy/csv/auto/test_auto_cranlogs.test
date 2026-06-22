@@ -3,7 +3,7 @@
 # group: [auto]
 
 statement ok
-CREATE TABLE cranlogs AS SELECT * FROM read_csv_auto ('test/sql/copy/csv/data/real/tmp2013-06-15.csv.gz');
+CREATE TABLE cranlogs AS SELECT * FROM read_csv_auto ('{DATA_DIR}/csv/real/tmp2013-06-15.csv.gz');
 
 query I
 SELECT COUNT(*) FROM cranlogs;
@@ -20,15 +20,11 @@ SELECT * FROM cranlogs LIMIT 5;
 2013-06-15	00:14:52	254933	3.0.1	x86_64	linux-gnu	foreign	0.8-54	HK	5
 
 
-# FIXME
-require vector_size 512
-
-# read with parallel reader and verify that we get the same result
 statement ok
-SET experimental_parallel_csv=true;
+PRAGMA verify_parallelism
 
 statement ok
-CREATE TABLE cranlogs2 AS SELECT * FROM read_csv_auto ('test/sql/copy/csv/data/real/tmp2013-06-15.csv.gz');
+CREATE TABLE cranlogs2 AS SELECT * FROM read_csv_auto ('{DATA_DIR}/csv/real/tmp2013-06-15.csv.gz');
 
 query IIIIIIIIII
 (SELECT * FROM cranlogs EXCEPT SELECT * FROM cranlogs2)

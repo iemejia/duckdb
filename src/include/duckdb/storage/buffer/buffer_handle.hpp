@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/storage/storage_info.hpp"
+#include "duckdb/common/file_buffer.hpp"
 
 namespace duckdb {
 class BlockHandle;
@@ -17,7 +18,7 @@ class FileBuffer;
 class BufferHandle {
 public:
 	DUCKDB_API BufferHandle();
-	DUCKDB_API BufferHandle(shared_ptr<BlockHandle> handle, FileBuffer *node);
+	DUCKDB_API explicit BufferHandle(shared_ptr<BlockHandle> handle, optional_ptr<FileBuffer> node);
 	DUCKDB_API ~BufferHandle();
 	// disable copy constructors
 	BufferHandle(const BufferHandle &other) = delete;
@@ -30,9 +31,19 @@ public:
 	//! Returns whether or not the BufferHandle is valid.
 	DUCKDB_API bool IsValid() const;
 	//! Returns a pointer to the buffer data. Handle must be valid.
-	DUCKDB_API data_ptr_t Ptr() const;
+	inline const_data_ptr_t Ptr() const {
+		D_ASSERT(IsValid());
+		return node->GetData();
+	}
 	//! Returns a pointer to the buffer data. Handle must be valid.
-	DUCKDB_API data_ptr_t Ptr();
+	inline const_data_ptr_t Ptr() {
+		D_ASSERT(IsValid());
+		return node->GetData();
+	}
+	inline data_ptr_t GetDataMutable() {
+		D_ASSERT(IsValid());
+		return node->GetDataMutable();
+	}
 	//! Gets the underlying file buffer. Handle must be valid.
 	DUCKDB_API FileBuffer &GetFileBuffer();
 	//! Destroys the buffer handle
@@ -46,7 +57,7 @@ private:
 	//! The block handle
 	shared_ptr<BlockHandle> handle;
 	//! The managed buffer node
-	FileBuffer *node;
+	optional_ptr<FileBuffer> node;
 };
 
 } // namespace duckdb

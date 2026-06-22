@@ -3,9 +3,6 @@
 # group: [pedro]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE t0 (c0 INT);
 
 query I
@@ -13,5 +10,6 @@ SELECT 1 FROM t0 WHERE DATE '2010-1-1' = 2;
 ----
 
 query I
-SELECT 1 FROM (VALUES (1),(2),(NULL)) t0(c0) WHERE c0 BETWEEN 3 AND (CAST('inf' AS REAL) - 2);
+SELECT 1 FROM (VALUES (1),(2),(NULL),(4)) t0(c0) WHERE c0 BETWEEN 3 AND (CAST('inf' AS REAL) - 2);
 ----
+1

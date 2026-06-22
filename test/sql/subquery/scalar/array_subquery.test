@@ -3,7 +3,7 @@
 # group: [scalar]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE integers(i INTEGER);
@@ -88,3 +88,9 @@ NULL	[]
 1	[1, 1]
 2	[2, 2]
 3	[3, 3]
+
+# should only allow one column in array subquery
+statement error
+select array(select 1,2)
+----
+<REGEX>:.*inder Error.*Subquery returns 2 columns.*

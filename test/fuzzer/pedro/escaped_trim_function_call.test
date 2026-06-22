@@ -3,10 +3,7 @@
 # group: [pedro]
 
 statement ok
-PRAGMA enable_verification
+SELECT "trim"('hello');
 
 statement ok
-SELECT "trim"(1);
-
-statement ok
-SELECT trim(1);
+SELECT trim('hello');

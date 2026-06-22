@@ -2,6 +2,7 @@
 #include "duckdb/parser/column_definition.hpp"
 #include "duckdb/common/set.hpp"
 #include "duckdb/common/queue.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 
 namespace duckdb {
 
@@ -17,10 +18,10 @@ void ColumnDependencyManager::AddGeneratedColumn(const ColumnDefinition &column,
 	column.GetListOfDependencies(referenced_columns);
 	vector<LogicalIndex> indices;
 	for (auto &col : referenced_columns) {
-		if (!list.ColumnExists(col)) {
+		if (!list.ColumnExists(Identifier(col))) {
 			throw BinderException("Column \"%s\" referenced by generated column does not exist", col);
 		}
-		auto &entry = list.GetColumn(col);
+		auto &entry = list.GetColumn(Identifier(col));
 		indices.push_back(entry.Logical());
 	}
 	return AddGeneratedColumn(column.Logical(), indices);
@@ -177,12 +178,12 @@ void ColumnDependencyManager::AdjustSingle(LogicalIndex idx, idx_t offset) {
 	}
 	if (has_dependents) {
 		D_ASSERT(!dependencies_map.count(new_idx));
-		dependencies_map[new_idx] = move(dependencies_map[idx]);
+		dependencies_map[new_idx] = std::move(dependencies_map[idx]);
 		dependencies_map.erase(idx);
 	}
 	if (has_dependencies) {
 		D_ASSERT(!dependents_map.count(new_idx));
-		dependents_map[new_idx] = move(dependents_map[idx]);
+		dependents_map[new_idx] = std::move(dependents_map[idx]);
 		dependents_map.erase(idx);
 	}
 }

@@ -2,12 +2,6 @@
 # description: Test binding unreferenced CTE parameters
 # group: [prepared]
 
-require skip_reload
-
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 CREATE TABLE "user" (name string);
 

@@ -5,33 +5,34 @@
 
 namespace duckdb {
 
-SetOpRelation::SetOpRelation(shared_ptr<Relation> left_p, shared_ptr<Relation> right_p, SetOperationType setop_type_p)
-    : Relation(left_p->context, RelationType::SET_OPERATION_RELATION), left(move(left_p)), right(move(right_p)),
-      setop_type(setop_type_p) {
-	if (left->context.GetContext() != right->context.GetContext()) {
-		throw Exception("Cannot combine LEFT and RIGHT relations of different connections!");
+SetOpRelation::SetOpRelation(shared_ptr<Relation> left_p, shared_ptr<Relation> right_p, SetOperationType setop_type_p,
+                             bool setop_all)
+    : Relation(left_p->context, RelationType::SET_OPERATION_RELATION), left(std::move(left_p)),
+      right(std::move(right_p)), setop_type(setop_type_p), setop_all(setop_all) {
+	if (left->context->GetContext() != right->context->GetContext()) {
+		throw InvalidInputException("Cannot combine LEFT and RIGHT relations of different connections!");
 	}
-	vector<ColumnDefinition> dummy_columns;
-	context.GetContext()->TryBindRelation(*this, dummy_columns);
+	TryBindRelation(columns);
 }
 
 unique_ptr<QueryNode> SetOpRelation::GetQueryNode() {
-	auto result = make_unique<SetOperationNode>();
-	if (setop_type == SetOperationType::EXCEPT || setop_type == SetOperationType::INTERSECT) {
-		result->modifiers.push_back(make_unique<DistinctModifier>());
+	auto result = make_uniq<SetOperationNode>();
+	if (!setop_all) {
+		result->modifiers.push_back(make_uniq<DistinctModifier>());
 	}
-	result->left = left->GetQueryNode();
-	result->right = right->GetQueryNode();
+	result->children.push_back(left->GetQueryNode());
+	result->children.push_back(right->GetQueryNode());
 	result->setop_type = setop_type;
-	return move(result);
+	result->setop_all = setop_all;
+	return std::move(result);
 }
 
-string SetOpRelation::GetAlias() {
+Identifier SetOpRelation::GetAlias() {
 	return left->GetAlias();
 }
 
 const vector<ColumnDefinition> &SetOpRelation::Columns() {
-	return left->Columns();
+	return this->columns;
 }
 
 string SetOpRelation::ToString(idx_t depth) {

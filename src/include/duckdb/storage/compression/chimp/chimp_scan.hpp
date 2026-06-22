@@ -12,18 +12,15 @@
 #include "duckdb/storage/compression/chimp/algorithm/chimp_utils.hpp"
 
 #include "duckdb/common/limits.hpp"
-#include "duckdb/common/types/null_value.hpp"
-#include "duckdb/function/compression/compression.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/function/compression_function.hpp"
-#include "duckdb/main/config.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
-#include "duckdb/storage/statistics/numeric_statistics.hpp"
-#include "duckdb/storage/table/column_data_checkpointer.hpp"
+
 #include "duckdb/storage/table/column_segment.hpp"
-#include "duckdb/common/operator/subtract.hpp"
 
 #include "duckdb/storage/compression/chimp/algorithm/flag_buffer.hpp"
 #include "duckdb/storage/compression/chimp/algorithm/leading_zero_buffer.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
 
 namespace duckdb {
 
@@ -133,13 +130,13 @@ private:
 template <class T>
 struct ChimpScanState : public SegmentScanState {
 public:
-	using CHIMP_TYPE = typename ChimpType<T>::type;
+	using CHIMP_TYPE = typename ChimpType<T>::TYPE;
 
 	explicit ChimpScanState(ColumnSegment &segment) : segment(segment), segment_count(segment.count) {
-		auto &buffer_manager = BufferManager::GetBufferManager(segment.db);
+		auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
 
-		handle = buffer_manager.Pin(segment.block);
-		auto dataptr = handle.Ptr();
+		handle = buffer_manager.Pin(segment.GetBlockHandle());
+		auto dataptr = handle.GetDataMutable();
 		// ScanStates never exceed the boundaries of a Segment,
 		// but are not guaranteed to start at the beginning of the Block
 		auto start_of_data_segment = dataptr + segment.GetBlockOffset() + ChimpPrimitives::HEADER_SIZE;
@@ -183,7 +180,6 @@ public:
 	}
 
 	void LoadGroup(CHIMP_TYPE *value_buffer) {
-
 		//! FIXME: If we change the order of this to flag -> leading_zero_blocks -> packed_data
 		//! We can leave out the leading zero block count as well, because it can be derived from
 		//! Extracting all the flags and counting the 3's
@@ -191,7 +187,7 @@ public:
 		// Load the offset indicating where a groups data starts
 		metadata_ptr -= sizeof(uint32_t);
 		auto data_byte_offset = Load<uint32_t>(metadata_ptr);
-		D_ASSERT(data_byte_offset < Storage::BLOCK_SIZE);
+		D_ASSERT(data_byte_offset < segment.GetBlockSize());
 		//  Only used for point queries
 		(void)data_byte_offset;
 
@@ -201,7 +197,7 @@ public:
 		D_ASSERT(leading_zero_block_count <= ChimpPrimitives::CHIMP_SEQUENCE_SIZE / 8);
 
 		// Load the leading zero block count
-		metadata_ptr -= 3 * leading_zero_block_count;
+		metadata_ptr -= 3ULL * leading_zero_block_count;
 		const auto leading_zero_block_ptr = metadata_ptr;
 
 		// Figure out how many flags there are
@@ -209,7 +205,7 @@ public:
 		auto group_size = MinValue<idx_t>(segment_count - total_value_count, ChimpPrimitives::CHIMP_SEQUENCE_SIZE);
 		// Reduce by one, because the first value of a group does not have a flag
 		auto flag_count = group_size - 1;
-		uint16_t flag_byte_count = (AlignValue<uint16_t, 4>(flag_count) / 4);
+		uint16_t flag_byte_count = AlignValue<uint16_t, 4>(UnsafeNumericCast<uint16_t>(flag_count)) / 4;
 
 		// Load the flags
 		metadata_ptr -= flag_byte_count;
@@ -238,7 +234,7 @@ public:
 	//! Skip the next 'skip_count' values, we don't store the values
 	// TODO: use the metadata to determine if we can skip a group
 	void Skip(ColumnSegment &segment, idx_t skip_count) {
-		using INTERNAL_TYPE = typename ChimpType<T>::type;
+		using INTERNAL_TYPE = typename ChimpType<T>::TYPE;
 		INTERNAL_TYPE buffer[ChimpPrimitives::CHIMP_SEQUENCE_SIZE];
 
 		while (skip_count) {
@@ -250,8 +246,8 @@ public:
 };
 
 template <class T>
-unique_ptr<SegmentScanState> ChimpInitScan(ColumnSegment &segment) {
-	auto result = make_unique_base<SegmentScanState, ChimpScanState<T>>(segment);
+unique_ptr<SegmentScanState> ChimpInitScan(const QueryContext &context, ColumnSegment &segment) {
+	auto result = make_uniq_base<SegmentScanState, ChimpScanState<T>>(segment);
 	return result;
 }
 
@@ -261,10 +257,10 @@ unique_ptr<SegmentScanState> ChimpInitScan(ColumnSegment &segment) {
 template <class T>
 void ChimpScanPartial(ColumnSegment &segment, ColumnScanState &state, idx_t scan_count, Vector &result,
                       idx_t result_offset) {
-	using INTERNAL_TYPE = typename ChimpType<T>::type;
-	auto &scan_state = (ChimpScanState<T> &)*state.scan_state;
+	using INTERNAL_TYPE = typename ChimpType<T>::TYPE;
+	auto &scan_state = state.scan_state->Cast<ChimpScanState<T>>();
 
-	T *result_data = FlatVector::GetData<T>(result);
+	T *result_data = FlatVector::GetDataMutable<T>(result);
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	auto current_result_ptr = (INTERNAL_TYPE *)(result_data + result_offset);
@@ -279,7 +275,7 @@ void ChimpScanPartial(ColumnSegment &segment, ColumnScanState &state, idx_t scan
 
 template <class T>
 void ChimpSkip(ColumnSegment &segment, ColumnScanState &state, idx_t skip_count) {
-	auto &scan_state = (ChimpScanState<T> &)*state.scan_state;
+	auto &scan_state = state.scan_state->Cast<ChimpScanState<T>>();
 	scan_state.Skip(segment, skip_count);
 }
 

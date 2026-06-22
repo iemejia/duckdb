@@ -8,32 +8,41 @@
 
 #pragma once
 
+#include "duckdb/main/table_description.hpp"
 #include "duckdb/parser/tableref.hpp"
-#include "duckdb/common/vector.hpp"
+#include "duckdb/parser/tableref/at_clause.hpp"
 
 namespace duckdb {
-//! Represents a TableReference to a base table in the schema
+
+//! Represents a TableReference to a base table in a catalog and schema.
 class BaseTableRef : public TableRef {
 public:
-	BaseTableRef() : TableRef(TableReferenceType::BASE_TABLE), schema_name(INVALID_SCHEMA) {
+	static constexpr const TableReferenceType TYPE = TableReferenceType::BASE_TABLE;
+
+public:
+	BaseTableRef()
+	    : TableRef(TableReferenceType::BASE_TABLE), catalog_name(INVALID_CATALOG), schema_name(INVALID_SCHEMA) {
+	}
+	explicit BaseTableRef(const TableDescription &description)
+	    : TableRef(TableReferenceType::BASE_TABLE), catalog_name(description.database), schema_name(description.schema),
+	      table_name(description.table) {
 	}
 
-	//! Schema name
-	string schema_name;
-	//! Table name
-	string table_name;
-	//! Aliases for the column names
-	vector<string> column_name_alias;
+	//! The catalog name.
+	Identifier catalog_name;
+	//! The schema name.
+	Identifier schema_name;
+	//! The table name.
+	Identifier table_name;
+	//! The timestamp/version at which to read this table entry (if any)
+	unique_ptr<AtClause> at_clause;
 
 public:
 	string ToString() const override;
-	bool Equals(const TableRef *other_p) const override;
-
+	bool Equals(const TableRef &other_p) const override;
 	unique_ptr<TableRef> Copy() override;
-
-	//! Serializes a blob into a BaseTableRef
-	void Serialize(FieldWriter &serializer) const override;
-	//! Deserializes a blob back into a BaseTableRef
-	static unique_ptr<TableRef> Deserialize(FieldReader &source);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<TableRef> Deserialize(Deserializer &source);
 };
+
 } // namespace duckdb

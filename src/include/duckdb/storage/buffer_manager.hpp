@@ -8,159 +8,134 @@
 
 #pragma once
 
-#include "duckdb/common/atomic.hpp"
-#include "duckdb/common/file_system.hpp"
-#include "duckdb/common/mutex.hpp"
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/storage/block_manager.hpp"
-#include "duckdb/storage/buffer/block_handle.hpp"
+#include "duckdb/common/enums/memory_tag.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
-#include "duckdb/common/allocator.hpp"
+#include "duckdb/storage/buffer/temporary_file_information.hpp"
 
 namespace duckdb {
+class BlockMemory;
+class Allocator;
+class BufferPool;
+class TemporaryMemoryManager;
+class AttachedDatabase;
 class BlockManager;
 class DatabaseInstance;
-class TemporaryDirectoryHandle;
-struct EvictionQueue;
 
-//! The buffer manager is in charge of handling memory management for the database. It hands out memory buffers that can
-//! be used by the database internally.
-//
-//! BlockIds are NOT unique within the context of a BufferManager. A buffer manager
-//! can be shared by many BlockManagers.
 class BufferManager {
 	friend class BufferHandle;
 	friend class BlockHandle;
 	friend class BlockManager;
 
 public:
-	BufferManager(DatabaseInstance &db, string temp_directory, idx_t maximum_memory);
-	virtual ~BufferManager();
+	BufferManager() {
+	}
+	virtual ~BufferManager() {
+	}
 
-	//! Register an in-memory buffer of arbitrary size, as long as it is >= BLOCK_SIZE. can_destroy signifies whether or
-	//! not the buffer can be destroyed when unpinned, or whether or not it needs to be written to a temporary file so
-	//! it can be reloaded. The resulting buffer will already be allocated, but needs to be pinned in order to be used.
-	shared_ptr<BlockHandle> RegisterMemory(idx_t block_size, bool can_destroy);
-	//! Registers an in-memory buffer that cannot be unloaded until it is destroyed
-	//! This buffer can be small (smaller than BLOCK_SIZE)
-	//! Unpin and pin are nops on this block of memory
-	shared_ptr<BlockHandle> RegisterSmallMemory(idx_t block_size);
-
-	//! Allocate an in-memory buffer with a single pin.
-	//! The allocated memory is released when the buffer handle is destroyed.
-	DUCKDB_API BufferHandle Allocate(idx_t block_size);
-
-	//! Reallocate an in-memory buffer that is pinned.
-	void ReAllocate(shared_ptr<BlockHandle> &handle, idx_t block_size);
-
-	BufferHandle Pin(shared_ptr<BlockHandle> &handle);
-	void Unpin(shared_ptr<BlockHandle> &handle);
-
-	//! Set a new memory limit to the buffer manager, throws an exception if the new limit is too low and not enough
-	//! blocks can be evicted
-	void SetLimit(idx_t limit = (idx_t)-1);
-
-	static BufferManager &GetBufferManager(ClientContext &context);
+public:
 	DUCKDB_API static BufferManager &GetBufferManager(DatabaseInstance &db);
+	DUCKDB_API static const BufferManager &GetBufferManager(const DatabaseInstance &db);
+	DUCKDB_API static BufferManager &GetBufferManager(ClientContext &context);
+	DUCKDB_API static const BufferManager &GetBufferManager(const ClientContext &context);
+	DUCKDB_API static BufferManager &GetBufferManager(AttachedDatabase &db);
+	DUCKDB_API static idx_t GetAllocSize(const idx_t alloc_size);
 
-	idx_t GetUsedMemory() {
-		return current_memory;
-	}
-	idx_t GetMaxMemory() {
-		return maximum_memory;
-	}
+public:
+	//! Allocate temporary memory of size block_size.
+	virtual shared_ptr<BlockHandle> AllocateTemporaryMemory(MemoryTag tag, idx_t block_size,
+	                                                        bool can_destroy = true) = 0;
+	//! Allocate block-based memory.
+	//! The block manager provides the block size, and the block header size.
+	//! Returns the BlockHandle managing the registered memory.
+	virtual shared_ptr<BlockHandle> AllocateMemory(MemoryTag tag, BlockManager *block_manager,
+	                                               bool can_destroy = true) = 0;
+	//! Allocate (temporary) memory of size block_size, and pin it.
+	virtual BufferHandle Allocate(MemoryTag tag, idx_t block_size, bool can_destroy = true) = 0;
+	//! Allocate block-based memory and pin it.
+	virtual BufferHandle Allocate(MemoryTag tag, BlockManager *block_manager, bool can_destroy = true) = 0;
+	//! Pin a block handle.
+	virtual BufferHandle Pin(shared_ptr<BlockHandle> &handle) = 0;
+	virtual BufferHandle Pin(const QueryContext &context, shared_ptr<BlockHandle> &handle) = 0;
+	//! Pre-fetch a series of blocks.
+	//! Using this function is a performance suggestion.
+	virtual void Prefetch(vector<shared_ptr<BlockHandle>> &handles) = 0;
+	//! Unpin a block handle.
+	virtual void Unpin(shared_ptr<BlockHandle> &handle) = 0;
 
-	const string &GetTemporaryDirectory() {
-		return temp_directory;
-	}
+	//! Returns the currently allocated memory.
+	virtual idx_t GetUsedMemory() const = 0;
+	//! Returns the maximum available memory.
+	virtual idx_t GetMaxMemory() const = 0;
+	//! Returns the currently used swap space.
+	virtual idx_t GetUsedSwap() const = 0;
+	//! Returns the maximum swap space that can be used.
+	virtual optional_idx GetMaxSwap() const = 0;
+	//! Returns the block allocation size for buffer-managed blocks.
+	virtual idx_t GetBlockAllocSize() const = 0;
+	//! Returns the block size for buffer-managed blocks.
+	virtual idx_t GetBlockSize() const = 0;
+	//! Returns the maximum available memory for a given query.
+	virtual idx_t GetOperatorMemoryLimit() const = 0;
 
-	void SetTemporaryDirectory(string new_dir);
+	//! Returns a newly registered block of transient memory.
+	virtual shared_ptr<BlockHandle> RegisterTransientMemory(const idx_t size, BlockManager &block_manager);
+	//! Returns a newly registered block of memory that is smaller than the block size setting.
+	virtual shared_ptr<BlockHandle> RegisterSmallMemory(const idx_t size);
+	//! Returns a newly registered block of memory that is smaller than the block size setting and has a memory tag.
+	virtual shared_ptr<BlockHandle> RegisterSmallMemory(MemoryTag tag, const idx_t size);
 
-	DUCKDB_API Allocator &GetBufferAllocator();
+	//! Get the buffer allocator.
+	virtual DUCKDB_API Allocator &GetBufferAllocator();
+	//! Reserve memory.
+	virtual DUCKDB_API void ReserveMemory(idx_t size);
+	//! Free reserved memory.
+	virtual DUCKDB_API void FreeReservedMemory(idx_t size);
+	//! GetMemoryUsageInfo returns MemoryInformation for each memory tag.
+	virtual vector<MemoryInformation> GetMemoryUsageInfo() const = 0;
+	//! Set a new memory limit.
+	//! Throws an exception, if the new limit is too low, meaning not enough blocks can be evicted.
+	virtual void SetMemoryLimit(idx_t limit = (idx_t)-1);
+	//! Set a new swap limit.
+	virtual void SetSwapLimit(optional_idx limit = optional_idx());
 
-	DatabaseInstance &GetDatabase() {
-		return db;
-	}
+	//! Get the block manager used for in-memory data
+	virtual BlockManager &GetTemporaryBlockManager() = 0;
+	//! Get the temporary file information of each temporary file.
+	virtual vector<TemporaryFileInformation> GetTemporaryFiles();
+	//! Get the path to the temporary file directory.
+	virtual const string &GetTemporaryDirectory() const;
+	//! Set the path to the temporary file directory.
+	virtual void SetTemporaryDirectory(const string &new_dir);
+	//! Returns true, if the path to the temporary file directory is not empty.
+	virtual bool HasTemporaryDirectory() const;
+	//! Returns true if there are files found in the temporary directory
+	virtual bool HasFilesInTemporaryDirectory() const;
 
 	//! Construct a managed buffer.
-	//! The block_id is just used for internal tracking. It doesn't map to any actual
-	//! BlockManager.
-	virtual unique_ptr<FileBuffer> ConstructManagedBuffer(idx_t size, unique_ptr<FileBuffer> &&source,
+	virtual unique_ptr<FileBuffer> ConstructManagedBuffer(idx_t size, idx_t block_header_size,
+	                                                      unique_ptr<FileBuffer> &&source,
 	                                                      FileBufferType type = FileBufferType::MANAGED_BUFFER);
+	//! Get the buffer pool.
+	virtual BufferPool &GetBufferPool() const;
+	//! Get the const database.
+	virtual const DatabaseInstance &GetDatabase() const = 0;
+	//! Get the database.
+	virtual DatabaseInstance &GetDatabase() = 0;
+	//! Get the manager assigning reservations for temporary memory, e.g., for query intermediates.
+	virtual TemporaryMemoryManager &GetTemporaryMemoryManager();
 
-	DUCKDB_API void ReserveMemory(idx_t size);
-	DUCKDB_API void FreeReservedMemory(idx_t size);
-
-private:
-	//! Evict blocks until the currently used memory + extra_memory fit, returns false if this was not possible
-	//! (i.e. not enough blocks could be evicted)
-	//! If the "buffer" argument is specified AND the system can find a buffer to re-use for the given allocation size
-	//! "buffer" will be made to point to the re-usable memory. Note that this is not guaranteed.
-	//! Returns a pair. result.first indicates if eviction was successful. result.second contains the
-	//! reservation handle, which can be moved to the BlockHandle that will own the reservation.
-	struct EvictionResult {
-		bool success;
-		TempBufferPoolReservation reservation;
-	};
-	EvictionResult EvictBlocks(idx_t extra_memory, idx_t memory_limit, unique_ptr<FileBuffer> *buffer = nullptr);
-
-	//! Helper
-	template <typename... ARGS>
-	TempBufferPoolReservation EvictBlocksOrThrow(idx_t extra_memory, idx_t limit, unique_ptr<FileBuffer> *buffer,
-	                                             ARGS...);
-
-	//! Garbage collect eviction queue
-	void PurgeQueue();
-
-	//! Write a temporary buffer to disk
-	void WriteTemporaryBuffer(block_id_t block_id, FileBuffer &buffer);
-	//! Read a temporary buffer from disk
-	unique_ptr<FileBuffer> ReadTemporaryBuffer(block_id_t id, unique_ptr<FileBuffer> buffer = nullptr);
-	//! Get the path of the temporary buffer
-	string GetTemporaryPath(block_id_t id);
-
-	void DeleteTemporaryFile(block_id_t id);
-
-	void RequireTemporaryDirectory();
-
-	void AddToEvictionQueue(shared_ptr<BlockHandle> &handle);
-
-	string InMemoryWarning();
-
-	static data_ptr_t BufferAllocatorAllocate(PrivateAllocatorData *private_data, idx_t size);
-	static void BufferAllocatorFree(PrivateAllocatorData *private_data, data_ptr_t pointer, idx_t size);
-	static data_ptr_t BufferAllocatorRealloc(PrivateAllocatorData *private_data, data_ptr_t pointer, idx_t old_size,
-	                                         idx_t size);
-
-	//! When the BlockHandle reaches 0 readers, this creates a new FileBuffer for this BlockHandle and
-	//! overwrites the data within with garbage. Any readers that do not hold the pin will notice TODO rewrite
-	void VerifyZeroReaders(shared_ptr<BlockHandle> &handle);
-
-private:
-	//! The database instance
-	DatabaseInstance &db;
-	//! The lock for changing the memory limit
-	mutex limit_lock;
-	//! The current amount of memory that is occupied by the buffer manager (in bytes)
-	atomic<idx_t> current_memory;
-	//! The maximum amount of memory that the buffer manager can keep (in bytes)
-	atomic<idx_t> maximum_memory;
-	//! The directory name where temporary files are stored
-	string temp_directory;
-	//! Lock for creating the temp handle
-	mutex temp_handle_lock;
-	//! Handle for the temporary directory
-	unique_ptr<TemporaryDirectoryHandle> temp_directory_handle;
-	//! Eviction queue
-	unique_ptr<EvictionQueue> queue;
-	//! The temporary id used for managed buffers
-	atomic<block_id_t> temporary_id;
-	//! Total number of insertions into the eviction queue. This guides the schedule for calling PurgeQueue.
-	atomic<uint32_t> queue_insertions;
-	//! Allocator associated with the buffer manager, that passes all allocations through this buffer manager
-	Allocator buffer_allocator;
-	//! Block manager for temp data
-	unique_ptr<BlockManager> temp_block_manager;
+	//! Purge the eviction queue of the block handle.
+	virtual void PurgeQueue(const BlockHandle &handle) = 0;
+	//! Add the block handle to the eviction queue.
+	virtual void AddToEvictionQueue(shared_ptr<BlockHandle> &handle);
+	//! Write a temporary file buffer.
+	virtual void WriteTemporaryBuffer(MemoryTag tag, block_id_t block_id, FileBuffer &buffer);
+	//! Read a temporary buffer.
+	virtual unique_ptr<FileBuffer> ReadTemporaryBuffer(QueryContext context, MemoryTag tag, BlockHandle &block,
+	                                                   unique_ptr<FileBuffer> buffer);
+	//! Delete the temporary file containing the block memory.
+	virtual void DeleteTemporaryFile(BlockMemory &memory);
 };
 
 } // namespace duckdb

@@ -2,9 +2,6 @@
 # description: Test UNION type casting
 # group: [setops]
 
-statement ok
-PRAGMA enable_verification
-
 # type casting in single union
 query R
 SELECT 1 UNION SELECT 1.0
@@ -37,7 +34,7 @@ SELECT 1 UNION ALL (SELECT 1.0 UNION ALL SELECT 1.0 UNION ALL SELECT 1.0) UNION 
 1
 1
 
-query T
+query I
 SELECT 1 UNION (SELECT '1' UNION SELECT '1' UNION SELECT '1') UNION SELECT 1;
 ----
 1

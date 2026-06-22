@@ -11,6 +11,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/types/interval.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/windows_undefs.hpp"
 
@@ -26,11 +27,12 @@ inline T NullValue() {
 	return std::numeric_limits<T>::min();
 }
 
-constexpr const char str_nil[2] = {'\200', '\0'};
+//! This could be two bytes but then GCC gives a warning when it's copied
+constexpr const char str_nil[4] = {'\200', '\0', '\0', '\0'};
 
 template <>
 inline const char *NullValue() {
-	D_ASSERT(str_nil[0] == '\200' && str_nil[1] == '\0');
+	D_ASSERT(str_nil[0] == '\200' && str_nil[1] == '\0' && str_nil[2] == '\0' && str_nil[3] == '\0');
 	return str_nil;
 }
 
@@ -41,7 +43,7 @@ inline string_t NullValue() {
 
 template <>
 inline char *NullValue() {
-	return (char *)NullValue<const char *>();
+	return (char *)NullValue<const char *>(); // NOLINT
 }
 
 template <>

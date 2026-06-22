@@ -9,6 +9,11 @@
 #pragma once
 
 #include "duckdb/common/constants.hpp"
+#include "duckdb/common/identifier.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/main/query_parameters.hpp"
+#include "duckdb/common/enums/database_modification_type.hpp"
 
 namespace duckdb {
 
@@ -34,18 +39,24 @@ enum class StatementType : uint8_t {
 	DROP_STATEMENT,         // DROP statement type
 	EXPORT_STATEMENT,       // EXPORT statement type
 	PRAGMA_STATEMENT,       // PRAGMA statement type
-	SHOW_STATEMENT,         // SHOW statement type
 	VACUUM_STATEMENT,       // VACUUM statement type
 	CALL_STATEMENT,         // CALL statement type
 	SET_STATEMENT,          // SET statement type
 	LOAD_STATEMENT,         // LOAD statement type
 	RELATION_STATEMENT,
 	EXTENSION_STATEMENT,
-	LOGICAL_PLAN_STATEMENT
-
+	LOGICAL_PLAN_STATEMENT,
+	ATTACH_STATEMENT,
+	DETACH_STATEMENT,
+	MULTI_STATEMENT,
+	COPY_DATABASE_STATEMENT,
+	UPDATE_EXTENSIONS_STATEMENT,
+	MERGE_INTO_STATEMENT,
+	CONNECT_STATEMENT,
+	DISCONNECT_STATEMENT
 };
 
-string StatementTypeToString(StatementType type);
+DUCKDB_API string StatementTypeToString(StatementType type);
 
 enum class StatementReturnType : uint8_t {
 	QUERY_RESULT, // the statement returns a query result (e.g. for display to the user)
@@ -55,26 +66,59 @@ enum class StatementReturnType : uint8_t {
 
 string StatementReturnTypeToString(StatementReturnType type);
 
+class Catalog;
+class ClientContext;
+
 //! A struct containing various properties of a SQL statement
 struct StatementProperties {
 	StatementProperties()
-	    : read_only(true), requires_valid_transaction(true), allow_stream_result(false), bound_all_parameters(true),
-	      return_type(StatementReturnType::QUERY_RESULT), parameter_count(0) {
+	    : requires_valid_transaction(true), output_type(QueryResultOutputType::FORCE_MATERIALIZED),
+	      bound_all_parameters(true), return_type(StatementReturnType::QUERY_RESULT), parameter_count(0),
+	      always_require_rebind(false) {
 	}
 
-	//! Whether or not the statement is a read-only statement, or whether it can result in changes to the database
-	bool read_only;
+	struct CatalogIdentity {
+		idx_t catalog_oid;
+		optional_idx catalog_version;
+
+		bool operator==(const CatalogIdentity &rhs) const {
+			return catalog_oid == rhs.catalog_oid && catalog_version == rhs.catalog_version;
+		}
+
+		bool operator!=(const CatalogIdentity &rhs) const {
+			return !operator==(rhs);
+		}
+	};
+
+	struct ModificationInfo {
+		CatalogIdentity identity;
+		DatabaseModificationType modifications;
+	};
+
+	//! The set of databases this statement will read from
+	identifier_map_t<CatalogIdentity> read_databases;
+	//! The set of databases this statement will modify
+	identifier_map_t<ModificationInfo> modified_databases;
 	//! Whether or not the statement requires a valid transaction. Almost all statements require this, with the
-	//! exception of
+	//! exception of ROLLBACK
 	bool requires_valid_transaction;
 	//! Whether or not the result can be streamed to the client
-	bool allow_stream_result;
+	QueryResultOutputType output_type;
 	//! Whether or not all parameters have successfully had their types determined
 	bool bound_all_parameters;
 	//! What type of data the statement returns
 	StatementReturnType return_type;
 	//! The number of prepared statement parameters
 	idx_t parameter_count;
+	//! Whether or not the statement ALWAYS requires a rebind
+	bool always_require_rebind;
+
+	bool IsReadOnly() {
+		return modified_databases.empty();
+	}
+
+	void RegisterDBRead(Catalog &catalog, ClientContext &context);
+	void RegisterDBModify(Catalog &catalog, ClientContext &context, DatabaseModificationType modification);
 };
 
 } // namespace duckdb

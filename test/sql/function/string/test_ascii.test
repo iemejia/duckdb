@@ -2,9 +2,6 @@
 # description: test ascii() and chr() functions
 # group: [string]
 
-statement ok
-PRAGMA enable_verification
-
 # Some ascii checks
 query I
 SELECT ascii('x')
@@ -38,7 +35,7 @@ SELECT ASCII('Ä')
 196
 
 query I
-SELECT ASCII(5)
+SELECT ASCII('5')
 ----
 53
 
@@ -49,6 +46,8 @@ NULL
 
 statement error
 SELECT ASCII()
+----
+<REGEX>:.*Binder Error: No function matches.*
 
 query T
 SELECT CHR(97)
@@ -72,9 +71,15 @@ NULL
 
 statement error
 SELECT CHR(-10)
+----
+<REGEX>:.*Invalid Input Error: Invalid UTF8.*
 
 statement error
 SELECT CHR(1073741824)
+----
+<REGEX>:.*Invalid Input Error: Invalid UTF8.*
 
 statement error
 SELECT CHR()
+----
+<REGEX>:.*Binder Error: No function matches.*

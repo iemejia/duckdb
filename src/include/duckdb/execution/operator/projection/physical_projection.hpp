@@ -15,8 +15,11 @@ namespace duckdb {
 
 class PhysicalProjection : public PhysicalOperator {
 public:
-	PhysicalProjection(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
-	                   idx_t estimated_cardinality);
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::PROJECTION;
+
+public:
+	PhysicalProjection(PhysicalPlan &physical_plan, vector<LogicalType> types,
+	                   vector<unique_ptr<Expression>> select_list, idx_t estimated_cardinality);
 
 	vector<unique_ptr<Expression>> select_list;
 
@@ -29,7 +32,7 @@ public:
 		return true;
 	}
 
-	string ParamsToString() const override;
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 };
 
 } // namespace duckdb

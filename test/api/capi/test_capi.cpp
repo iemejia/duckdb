@@ -1,7 +1,7 @@
 #include "capi_tester.hpp"
+#include <regex>
 
 using namespace duckdb;
-using namespace std;
 
 static void require_hugeint_eq(duckdb_hugeint left, duckdb_hugeint right) {
 	REQUIRE(left.lower == right.lower);
@@ -15,13 +15,26 @@ static void require_hugeint_eq(duckdb_hugeint left, uint64_t lower, int64_t uppe
 	require_hugeint_eq(left, temp);
 }
 
+static void require_uhugeint_eq(duckdb_uhugeint left, duckdb_uhugeint right) {
+	REQUIRE(left.lower == right.lower);
+	REQUIRE(left.upper == right.upper);
+}
+
+static void require_uhugeint_eq(duckdb_uhugeint left, uint64_t lower, uint64_t upper) {
+	duckdb_uhugeint temp;
+	temp.lower = lower;
+	temp.upper = upper;
+	require_uhugeint_eq(left, temp);
+}
+
 TEST_CASE("Basic test of C API", "[capi]") {
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 
 	// open the database in in-memory mode
 	REQUIRE(tester.OpenDatabase(nullptr));
 
+	REQUIRE_NO_FAIL(tester.Query("SET default_null_order='nulls_first'"));
 	// select scalar value
 	result = tester.Query("SELECT CAST(42 AS BIGINT)");
 	REQUIRE_NO_FAIL(*result);
@@ -86,6 +99,7 @@ TEST_CASE("Basic test of C API", "[capi]") {
 	// NULL selection
 	result = tester.Query("SELECT a, b FROM test ORDER BY a");
 	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->rows_changed() == 0);
 	// NULL, 11, 13
 	REQUIRE(result->IsNull(0, 0));
 	REQUIRE(result->Fetch<int32_t>(0, 1) == 11);
@@ -112,18 +126,20 @@ TEST_CASE("Basic test of C API", "[capi]") {
 	REQUIRE(duckdb_result_error(nullptr) == nullptr);
 	REQUIRE(duckdb_nullmask_data(nullptr, 0) == nullptr);
 	REQUIRE(duckdb_column_data(nullptr, 0) == nullptr);
+	REQUIRE(duckdb_result_error_type(nullptr) == DUCKDB_ERROR_INVALID);
 }
 
 TEST_CASE("Test different types of C API", "[capi]") {
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 
 	// open the database in in-memory mode
 	REQUIRE(tester.OpenDatabase(nullptr));
+	REQUIRE_NO_FAIL(tester.Query("SET default_null_order='nulls_first'"));
 
 	// integer columns
-	vector<string> types = {"TINYINT",  "SMALLINT",  "INTEGER",  "BIGINT", "HUGEINT",
-	                        "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT"};
+	duckdb::vector<string> types = {"TINYINT",  "SMALLINT",  "INTEGER",  "BIGINT",  "HUGEINT",
+	                                "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT"};
 	for (auto &type : types) {
 		// create the table and insert values
 		REQUIRE_NO_FAIL(tester.Query("BEGIN TRANSACTION"));
@@ -141,6 +157,7 @@ TEST_CASE("Test different types of C API", "[capi]") {
 		REQUIRE(result->Fetch<uint16_t>(0, 0) == 0);
 		REQUIRE(result->Fetch<uint32_t>(0, 0) == 0);
 		REQUIRE(result->Fetch<uint64_t>(0, 0) == 0);
+		REQUIRE(duckdb_uhugeint_to_double(result->Fetch<duckdb_uhugeint>(0, 0)) == 0);
 		REQUIRE(duckdb_hugeint_to_double(result->Fetch<duckdb_hugeint>(0, 0)) == 0);
 		REQUIRE(result->Fetch<string>(0, 0) == "");
 		REQUIRE(ApproxEqual(result->Fetch<float>(0, 0), 0.0f));
@@ -155,6 +172,7 @@ TEST_CASE("Test different types of C API", "[capi]") {
 		REQUIRE(result->Fetch<uint16_t>(0, 1) == 1);
 		REQUIRE(result->Fetch<uint32_t>(0, 1) == 1);
 		REQUIRE(result->Fetch<uint64_t>(0, 1) == 1);
+		REQUIRE(duckdb_uhugeint_to_double(result->Fetch<duckdb_uhugeint>(0, 1)) == 1);
 		REQUIRE(duckdb_hugeint_to_double(result->Fetch<duckdb_hugeint>(0, 1)) == 1);
 		REQUIRE(ApproxEqual(result->Fetch<float>(0, 1), 1.0f));
 		REQUIRE(ApproxEqual(result->Fetch<double>(0, 1), 1.0));
@@ -228,6 +246,20 @@ TEST_CASE("Test different types of C API", "[capi]") {
 	REQUIRE(time_val.sec == 30);
 	REQUIRE(time_val.micros == 123400);
 	REQUIRE(result->Fetch<string>(0, 2) == Value::TIME(12, 0, 30, 123400).ToString());
+
+	// time_ns columns
+	REQUIRE_NO_FAIL(tester.Query("CREATE TABLE time_ns_values(d TIME_NS)"));
+	REQUIRE_NO_FAIL(tester.Query("INSERT INTO time_ns_values VALUES ('12:34:56.789123456'), (NULL), ('12:34:56')"));
+
+	result = tester.Query("SELECT * FROM time_ns_values ORDER BY d");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->IsNull(0, 0));
+	duckdb_time_ns time_ns_val = result->Fetch<duckdb_time_ns>(0, 1);
+	REQUIRE(time_ns_val.nanos == 45296000000000);
+	REQUIRE(result->Fetch<string>(0, 1) == Value::TIME_NS(dtime_ns_t(45296000000000)).ToString());
+	time_ns_val = result->Fetch<duckdb_time_ns>(0, 2);
+	REQUIRE(time_ns_val.nanos == 45296789123456);
+	REQUIRE(result->Fetch<string>(0, 2) == Value::TIME_NS(dtime_ns_t(45296789123456)).ToString());
 
 	// blob columns
 	REQUIRE_NO_FAIL(tester.Query("CREATE TABLE blobs(b BLOB)"));
@@ -346,10 +378,16 @@ TEST_CASE("Test different types of C API", "[capi]") {
 	require_hugeint_eq(result->Fetch<duckdb_hugeint>(3, 0), 49082094825, 0);
 	require_hugeint_eq(result->Fetch<duckdb_hugeint>(4, 0), 0, 0);
 
+	require_uhugeint_eq(result->Fetch<duckdb_uhugeint>(0, 0), 1, 0);
+	require_uhugeint_eq(result->Fetch<duckdb_uhugeint>(1, 0), 100, 0);
+	require_uhugeint_eq(result->Fetch<duckdb_uhugeint>(2, 0), 0, 0); // overflow
+	require_uhugeint_eq(result->Fetch<duckdb_uhugeint>(3, 0), 49082094825, 0);
+	require_uhugeint_eq(result->Fetch<duckdb_uhugeint>(4, 0), 0, 0);
+
 	REQUIRE(result->Fetch<float>(0, 0) == 1.2f);
 	REQUIRE(result->Fetch<float>(1, 0) == 100.3f);
 	REQUIRE(floor(result->Fetch<float>(2, 0)) == -320939);
-	REQUIRE(floor(result->Fetch<float>(3, 0)) == 49082094824);
+	REQUIRE((int64_t)floor(result->Fetch<float>(3, 0)) == 49082093568);
 	REQUIRE(result->Fetch<float>(4, 0) == 0.0);
 
 	REQUIRE(result->Fetch<double>(0, 0) == 1.2);
@@ -388,9 +426,56 @@ TEST_CASE("Test different types of C API", "[capi]") {
 	REQUIRE(result->Fetch<string>(0, 0) == "-123.45");
 }
 
+TEST_CASE("decompose timetz with duckdb_from_time_tz", "[capi]") {
+	CAPITester tester;
+
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	auto res = tester.Query("SELECT TIMETZ '11:30:00.123456-02:00'");
+	REQUIRE(res->success);
+
+	auto chunk = res->FetchChunk(0);
+
+	REQUIRE(chunk->ColumnCount() == 1);
+	REQUIRE(res->ColumnType(0) == DUCKDB_TYPE_TIME_TZ);
+
+	auto data = (duckdb_time_tz *)chunk->GetData(0);
+
+	auto time_tz = duckdb_from_time_tz(data[0]);
+
+	REQUIRE(time_tz.time.hour == 11);
+	REQUIRE(time_tz.time.min == 30);
+	REQUIRE(time_tz.time.sec == 0);
+	REQUIRE(time_tz.time.micros == 123456);
+
+	REQUIRE(time_tz.offset == -7200);
+}
+
+TEST_CASE("create time_tz value") {
+	duckdb_time_struct time;
+	time.hour = 4;
+	time.min = 2;
+	time.sec = 6;
+	time.micros = 9;
+	int offset = 8000;
+
+	auto micros = duckdb_to_time(time);
+	auto res = duckdb_create_time_tz(micros.micros, offset);
+
+	// and back again
+
+	auto inverse = duckdb_from_time_tz(res);
+	REQUIRE(offset == inverse.offset);
+
+	REQUIRE(inverse.time.hour == 4);
+	REQUIRE(inverse.time.min == 2);
+	REQUIRE(inverse.time.sec == 6);
+	REQUIRE(inverse.time.micros == 9);
+}
+
 TEST_CASE("Test errors in C API", "[capi]") {
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 
 	// cannot open database in random directory
 	REQUIRE(!tester.OpenDatabase("/bla/this/directory/should/not/exist/hopefully/awerar333"));
@@ -465,7 +550,6 @@ TEST_CASE("Test C API config", "[capi]") {
 	REQUIRE(duckdb_create_config(&config) == DuckDBSuccess);
 	REQUIRE(duckdb_set_config(config, "access_mode", "invalid_access_mode") == DuckDBError);
 	REQUIRE(duckdb_set_config(config, "access_mode", "read_only") == DuckDBSuccess);
-	REQUIRE(duckdb_set_config(config, "aaaa_invalidoption", "read_only") == DuckDBError);
 
 	auto dbdir = TestCreatePath("capi_read_only_db");
 
@@ -491,6 +575,13 @@ TEST_CASE("Test C API config", "[capi]") {
 
 	// now we can connect
 	REQUIRE(duckdb_open_ext(dbdir.c_str(), &db, config, &error) == DuckDBSuccess);
+
+	// test unrecognized configuration
+	REQUIRE(duckdb_set_config(config, "aaaa_invalidoption", "read_only") == DuckDBSuccess);
+	REQUIRE(((DBConfig *)config)->options.unrecognized_options["aaaa_invalidoption"] == "read_only");
+	REQUIRE(duckdb_open_ext(dbdir.c_str(), &db, config, &error) == DuckDBError);
+	REQUIRE_THAT(error, Catch::Matchers::Contains("The following options were not recognized"));
+	duckdb_free(error);
 
 	// we can destroy the config right after duckdb_open
 	duckdb_destroy_config(&config);
@@ -548,9 +639,8 @@ TEST_CASE("Issue #2058: Cleanup after execution of invalid SQL statement causes 
 }
 
 TEST_CASE("Decimal -> Double casting issue", "[capi]") {
-
 	CAPITester tester;
-	unique_ptr<CAPIResult> result;
+	duckdb::unique_ptr<CAPIResult> result;
 
 	// open the database in in-memory mode
 	REQUIRE(tester.OpenDatabase(nullptr));
@@ -564,4 +654,101 @@ TEST_CASE("Decimal -> Double casting issue", "[capi]") {
 
 	auto string_from_decimal = result->Fetch<string>(0, 0);
 	REQUIRE(string_from_decimal == "-0.5");
+}
+
+TEST_CASE("Test custom_user_agent config", "[capi]") {
+	{
+		duckdb_database db;
+		duckdb_connection con;
+		duckdb_result result;
+
+		// Default custom_user_agent value
+		REQUIRE(duckdb_open_ext(NULL, &db, nullptr, NULL) != DuckDBError);
+		REQUIRE(duckdb_connect(db, &con) != DuckDBError);
+
+		duckdb_query(con, "PRAGMA user_agent", &result);
+
+		REQUIRE(duckdb_row_count(&result) == 1);
+		char *user_agent_value = duckdb_value_varchar(&result, 0, 0);
+		REQUIRE_THAT(user_agent_value, Catch::Matchers::Matches("duckdb/.*(.*) capi"));
+
+		duckdb_free(user_agent_value);
+		duckdb_destroy_result(&result);
+		duckdb_disconnect(&con);
+		duckdb_close(&db);
+	}
+
+	{
+		// Custom custom_user_agent value
+
+		duckdb_database db;
+		duckdb_connection con;
+		duckdb_result result_custom_user_agent;
+		duckdb_result result_full_user_agent;
+
+		duckdb_config config;
+		REQUIRE(duckdb_create_config(&config) != DuckDBError);
+		REQUIRE(duckdb_set_config(config, "custom_user_agent", "CUSTOM_STRING") != DuckDBError);
+
+		REQUIRE(duckdb_open_ext(NULL, &db, config, NULL) != DuckDBError);
+		REQUIRE(duckdb_connect(db, &con) != DuckDBError);
+
+		duckdb_query(con, "SELECT current_setting('custom_user_agent')", &result_custom_user_agent);
+		duckdb_query(con, "PRAGMA user_agent", &result_full_user_agent);
+
+		REQUIRE(duckdb_row_count(&result_custom_user_agent) == 1);
+		REQUIRE(duckdb_row_count(&result_full_user_agent) == 1);
+
+		char *custom_user_agent_value = duckdb_value_varchar(&result_custom_user_agent, 0, 0);
+		REQUIRE(string(custom_user_agent_value) == "CUSTOM_STRING");
+
+		char *full_user_agent_value = duckdb_value_varchar(&result_full_user_agent, 0, 0);
+		REQUIRE_THAT(full_user_agent_value, Catch::Matchers::Matches("duckdb/.*(.*) capi CUSTOM_STRING"));
+
+		duckdb_destroy_config(&config);
+		duckdb_free(custom_user_agent_value);
+		duckdb_free(full_user_agent_value);
+		duckdb_destroy_result(&result_custom_user_agent);
+		duckdb_destroy_result(&result_full_user_agent);
+		duckdb_disconnect(&con);
+		duckdb_close(&db);
+	}
+}
+
+TEST_CASE("Test unsupported types in the deprecated C API", "[capi]") {
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	string query_1 = R"EOF(
+		CREATE TABLE test(
+			id BIGINT,
+			one DECIMAL(18,3)[]
+		);
+	)EOF";
+	string query_2 = "INSERT INTO test VALUES (410, '[]');";
+	string query_3 = "INSERT INTO test VALUES (412, '[]');";
+	string query_4 = "SELECT id, one FROM test;";
+	REQUIRE_NO_FAIL(tester.Query(query_1));
+	REQUIRE_NO_FAIL(tester.Query(query_2));
+	REQUIRE_NO_FAIL(tester.Query(query_3));
+
+	// Passes, but does return invalid data for unsupported types.
+	auto result = tester.Query(query_4);
+	auto &result_c = result->InternalResult();
+
+	auto first_bigint_row = duckdb_value_string(&result_c, 0, 0).data;
+	REQUIRE(!string(first_bigint_row).compare("410"));
+	duckdb_free(first_bigint_row);
+	REQUIRE(duckdb_value_string(&result_c, 1, 0).data == nullptr);
+
+	auto second_bigint_row = duckdb_value_string(&result_c, 0, 1).data;
+	REQUIRE(!string(second_bigint_row).compare("412"));
+	duckdb_free(second_bigint_row);
+	REQUIRE(duckdb_value_string(&result_c, 1, 1).data == nullptr);
+}
+
+TEST_CASE("Test creating DUCKDB_ERROR_INTERNAL error data", "[capi]") {
+	auto error_data = duckdb_create_error_data(DUCKDB_ERROR_INTERNAL, "foo");
+	REQUIRE(error_data);
+	duckdb_destroy_error_data(&error_data);
 }

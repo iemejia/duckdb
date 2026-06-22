@@ -2,14 +2,13 @@
 # description: Next After test
 # group: [numeric]
 
-statement ok
-PRAGMA enable_verification
-
 statement error
 select nextafter()
+----
 
 statement error
 select nextafter('bla','bla')
+----
 
 query I
 select nextafter(NULL,1)

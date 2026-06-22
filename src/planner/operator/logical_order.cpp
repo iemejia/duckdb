@@ -1,20 +1,40 @@
 #include "duckdb/planner/operator/logical_order.hpp"
 
-#include "duckdb/common/field_writer.hpp"
-
 namespace duckdb {
 
-void LogicalOrder::Serialize(FieldWriter &writer) const {
-	writer.WriteRegularSerializableList(orders);
-	writer.WriteList<idx_t>(projections);
+LogicalOrder::LogicalOrder(vector<BoundOrderByNode> orders)
+    : LogicalOperator(LogicalOperatorType::LOGICAL_ORDER_BY), orders(std::move(orders)) {
 }
 
-unique_ptr<LogicalOperator> LogicalOrder::Deserialize(LogicalDeserializationState &state, FieldReader &reader) {
-	auto orders = reader.ReadRequiredSerializableList<BoundOrderByNode, BoundOrderByNode>(state.gstate);
-	auto projections = reader.ReadRequiredList<idx_t>();
-	auto result = make_unique<LogicalOrder>(move(orders));
-	result->projections = move(projections);
-	return move(result);
+vector<ColumnBinding> LogicalOrder::GetColumnBindings() {
+	auto child_bindings = children[0]->GetColumnBindings();
+	if (!HasProjectionMap()) {
+		return child_bindings;
+	}
+	return MapBindings(child_bindings, projection_map);
+}
+
+InsertionOrderPreservingMap<string> LogicalOrder::ParamsToString() const {
+	InsertionOrderPreservingMap<string> result;
+	string orders_info;
+	for (idx_t i = 0; i < orders.size(); i++) {
+		if (i > 0) {
+			orders_info += "\n";
+		}
+		orders_info += orders[i].expression->GetName();
+	}
+	result["__order_by__"] = orders_info;
+	SetParamsEstimatedCardinality(result);
+	return result;
+}
+
+void LogicalOrder::ResolveTypes() {
+	const auto child_types = children[0]->types;
+	if (!HasProjectionMap()) {
+		types = child_types;
+	} else {
+		types = MapTypes(child_types, projection_map);
+	}
 }
 
 } // namespace duckdb

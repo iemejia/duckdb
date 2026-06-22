@@ -1,33 +1,18 @@
 #include "duckdb/execution/physical_plan_generator.hpp"
 
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
-#include "duckdb/common/types/column_data_collection.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
+#include "duckdb/planner/operator/list.hpp"
+#include "duckdb/execution/operator/helper/physical_verify_vector.hpp"
+#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
-
-class DependencyExtractor : public LogicalOperatorVisitor {
-public:
-	explicit DependencyExtractor(unordered_set<CatalogEntry *> &dependencies) : dependencies(dependencies) {
-	}
-
-protected:
-	unique_ptr<Expression> VisitReplace(BoundFunctionExpression &expr, unique_ptr<Expression> *expr_ptr) override {
-		// extract dependencies from the bound function expression
-		if (expr.function.dependency) {
-			expr.function.dependency(expr, dependencies);
-		}
-		return nullptr;
-	}
-
-private:
-	unordered_set<CatalogEntry *> &dependencies;
-};
 
 PhysicalPlanGenerator::PhysicalPlanGenerator(ClientContext &context) : context(context) {
 }
@@ -35,185 +20,185 @@ PhysicalPlanGenerator::PhysicalPlanGenerator(ClientContext &context) : context(c
 PhysicalPlanGenerator::~PhysicalPlanGenerator() {
 }
 
-unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(unique_ptr<LogicalOperator> op) {
-	auto &profiler = QueryProfiler::Get(context);
-
-	// first resolve column references
-	profiler.StartPhase("column_binding");
-	ColumnBindingResolver resolver;
-	resolver.VisitOperator(*op);
-	profiler.EndPhase();
-
-	// now resolve types of all the operators
-	profiler.StartPhase("resolve_types");
-	op->ResolveOperatorTypes();
-	profiler.EndPhase();
-
-	// extract dependencies from the logical plan
-	DependencyExtractor extractor(dependencies);
-	extractor.VisitOperator(*op);
-
-	// then create the main physical plan
-	profiler.StartPhase("create_plan");
-	auto plan = CreatePlan(*op);
-	profiler.EndPhase();
-
-	plan->Verify();
-	return plan;
+unique_ptr<PhysicalPlan> PhysicalPlanGenerator::Plan(unique_ptr<LogicalOperator> op) {
+	auto &plan = ResolveAndPlan(std::move(op));
+	plan.Verify();
+	return std::move(physical_plan);
 }
 
-unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
-	op.estimated_cardinality = op.EstimateCardinality(context);
-	unique_ptr<PhysicalOperator> plan = nullptr;
+PhysicalOperator &PhysicalPlanGenerator::ResolveAndPlan(unique_ptr<LogicalOperator> op) {
+	auto &profiler = QueryProfiler::Get(context);
 
+	// Resolve the types of each operator.
+	{
+		auto timer = profiler.StartTimer<MetricPhysicalPlannerResolveTypes>();
+		op->ResolveOperatorTypes();
+	}
+
+	// Resolve the column references.
+	{
+		auto timer = profiler.StartTimer<MetricPhysicalPlannerColumnBinding>();
+		ColumnBindingResolver resolver;
+		resolver.VisitOperator(*op);
+	}
+
+	// Create the main physical plan.
+	{
+		auto timer = profiler.StartTimer<MetricPhysicalPlannerCreatePlan>();
+		physical_plan = PlanInternal(*op);
+	}
+
+	// Return a reference to the root of this plan.
+	return physical_plan->Root();
+}
+
+unique_ptr<PhysicalPlan> PhysicalPlanGenerator::PlanInternal(LogicalOperator &op) {
+	if (!physical_plan) {
+		physical_plan = make_uniq<PhysicalPlan>(Allocator::Get(context));
+	}
+	op.estimated_cardinality = op.EstimateCardinality(context);
+	physical_plan->SetRoot(CreatePlan(op));
+	physical_plan->Root().estimated_cardinality = op.estimated_cardinality;
+
+	auto debug_verify_vector = Settings::Get<DebugVerifyVectorSetting>(context);
+	if (debug_verify_vector != DebugVectorVerification::NONE) {
+		if (debug_verify_vector != DebugVectorVerification::DICTIONARY_EXPRESSION &&
+		    debug_verify_vector != DebugVectorVerification::VARIANT_VECTOR &&
+		    debug_verify_vector != DebugVectorVerification::SHREDDED_VECTOR) {
+			physical_plan->SetRoot(Make<PhysicalVerifyVector>(physical_plan->Root(), debug_verify_vector));
+		}
+	}
+	return std::move(physical_plan);
+}
+
+PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_GET:
-		plan = CreatePlan((LogicalGet &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalGet>());
 	case LogicalOperatorType::LOGICAL_PROJECTION:
-		plan = CreatePlan((LogicalProjection &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalProjection>());
 	case LogicalOperatorType::LOGICAL_EMPTY_RESULT:
-		plan = CreatePlan((LogicalEmptyResult &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalEmptyResult>());
 	case LogicalOperatorType::LOGICAL_FILTER:
-		plan = CreatePlan((LogicalFilter &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalFilter>());
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
-		plan = CreatePlan((LogicalAggregate &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalAggregate>());
 	case LogicalOperatorType::LOGICAL_WINDOW:
-		plan = CreatePlan((LogicalWindow &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalWindow>());
 	case LogicalOperatorType::LOGICAL_UNNEST:
-		plan = CreatePlan((LogicalUnnest &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalUnnest>());
 	case LogicalOperatorType::LOGICAL_LIMIT:
-		plan = CreatePlan((LogicalLimit &)op);
-		break;
-	case LogicalOperatorType::LOGICAL_LIMIT_PERCENT:
-		plan = CreatePlan((LogicalLimitPercent &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalLimit>());
 	case LogicalOperatorType::LOGICAL_SAMPLE:
-		plan = CreatePlan((LogicalSample &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalSample>());
 	case LogicalOperatorType::LOGICAL_ORDER_BY:
-		plan = CreatePlan((LogicalOrder &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalOrder>());
 	case LogicalOperatorType::LOGICAL_TOP_N:
-		plan = CreatePlan((LogicalTopN &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalTopN>());
 	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:
-		plan = CreatePlan((LogicalCopyToFile &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalCopyToFile>());
 	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
-		plan = CreatePlan((LogicalDummyScan &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalDummyScan>());
 	case LogicalOperatorType::LOGICAL_ANY_JOIN:
-		plan = CreatePlan((LogicalAnyJoin &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalAnyJoin>());
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-		plan = CreatePlan((LogicalDelimJoin &)op);
-		break;
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-		plan = CreatePlan((LogicalComparisonJoin &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalComparisonJoin>());
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
-		plan = CreatePlan((LogicalCrossProduct &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalCrossProduct>());
+	case LogicalOperatorType::LOGICAL_POSITIONAL_JOIN:
+		return CreatePlan(op.Cast<LogicalPositionalJoin>());
 	case LogicalOperatorType::LOGICAL_UNION:
 	case LogicalOperatorType::LOGICAL_EXCEPT:
 	case LogicalOperatorType::LOGICAL_INTERSECT:
-		plan = CreatePlan((LogicalSetOperation &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalSetOperation>());
 	case LogicalOperatorType::LOGICAL_INSERT:
-		plan = CreatePlan((LogicalInsert &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalInsert>());
 	case LogicalOperatorType::LOGICAL_DELETE:
-		plan = CreatePlan((LogicalDelete &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalDelete>());
 	case LogicalOperatorType::LOGICAL_CHUNK_GET:
-		plan = CreatePlan((LogicalColumnDataGet &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalColumnDataGet>());
 	case LogicalOperatorType::LOGICAL_DELIM_GET:
-		plan = CreatePlan((LogicalDelimGet &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalDelimGet>());
 	case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
-		plan = CreatePlan((LogicalExpressionGet &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalExpressionGet>());
 	case LogicalOperatorType::LOGICAL_UPDATE:
-		plan = CreatePlan((LogicalUpdate &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalUpdate>());
+	case LogicalOperatorType::LOGICAL_MERGE_INTO:
+		return CreatePlan(op.Cast<LogicalMergeInto>());
+	case LogicalOperatorType::LOGICAL_TRIGGER:
+		throw InternalException("LogicalTrigger must be rewritten before physical planning");
 	case LogicalOperatorType::LOGICAL_CREATE_TABLE:
-		plan = CreatePlan((LogicalCreateTable &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalCreateTable>());
 	case LogicalOperatorType::LOGICAL_CREATE_INDEX:
-		plan = CreatePlan((LogicalCreateIndex &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalCreateIndex>());
+	case LogicalOperatorType::LOGICAL_CREATE_SECRET:
+		return CreatePlan(op.Cast<LogicalCreateSecret>());
 	case LogicalOperatorType::LOGICAL_EXPLAIN:
-		plan = CreatePlan((LogicalExplain &)op);
-		break;
-	case LogicalOperatorType::LOGICAL_SHOW:
-		plan = CreatePlan((LogicalShow &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalExplain>());
 	case LogicalOperatorType::LOGICAL_DISTINCT:
-		plan = CreatePlan((LogicalDistinct &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalDistinct>());
 	case LogicalOperatorType::LOGICAL_PREPARE:
-		plan = CreatePlan((LogicalPrepare &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalPrepare>());
 	case LogicalOperatorType::LOGICAL_EXECUTE:
-		plan = CreatePlan((LogicalExecute &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalExecute>());
 	case LogicalOperatorType::LOGICAL_CREATE_VIEW:
 	case LogicalOperatorType::LOGICAL_CREATE_SEQUENCE:
 	case LogicalOperatorType::LOGICAL_CREATE_SCHEMA:
 	case LogicalOperatorType::LOGICAL_CREATE_MACRO:
 	case LogicalOperatorType::LOGICAL_CREATE_TYPE:
-		plan = CreatePlan((LogicalCreate &)op);
-		break;
+	case LogicalOperatorType::LOGICAL_CREATE_TRIGGER:
+		return CreatePlan(op.Cast<LogicalCreate>());
 	case LogicalOperatorType::LOGICAL_PRAGMA:
-		plan = CreatePlan((LogicalPragma &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalPragma>());
+	case LogicalOperatorType::LOGICAL_VACUUM:
+		return CreatePlan(op.Cast<LogicalVacuum>());
 	case LogicalOperatorType::LOGICAL_TRANSACTION:
 	case LogicalOperatorType::LOGICAL_ALTER:
 	case LogicalOperatorType::LOGICAL_DROP:
-	case LogicalOperatorType::LOGICAL_VACUUM:
 	case LogicalOperatorType::LOGICAL_LOAD:
-		plan = CreatePlan((LogicalSimple &)op);
-		break;
+	case LogicalOperatorType::LOGICAL_ATTACH:
+	case LogicalOperatorType::LOGICAL_DETACH:
+	case LogicalOperatorType::LOGICAL_CONNECT:
+	case LogicalOperatorType::LOGICAL_DISCONNECT:
+		return CreatePlan(op.Cast<LogicalSimple>());
 	case LogicalOperatorType::LOGICAL_RECURSIVE_CTE:
-		plan = CreatePlan((LogicalRecursiveCTE &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalRecursiveCTE>());
+	case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE:
+		return CreatePlan(op.Cast<LogicalMaterializedCTE>());
 	case LogicalOperatorType::LOGICAL_CTE_REF:
-		plan = CreatePlan((LogicalCTERef &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalCTERef>());
 	case LogicalOperatorType::LOGICAL_EXPORT:
-		plan = CreatePlan((LogicalExport &)op);
-		break;
+		return CreatePlan(op.Cast<LogicalExport>());
 	case LogicalOperatorType::LOGICAL_SET:
-		plan = CreatePlan((LogicalSet &)op);
-		break;
-	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR:
-		plan = ((LogicalExtensionOperator &)op).CreatePlan(context, *this);
-
-		if (!plan) {
-			throw InternalException("Missing PhysicalOperator for Extension Operator");
-		}
-		break;
-	default: {
+		return CreatePlan(op.Cast<LogicalSet>());
+	case LogicalOperatorType::LOGICAL_RESET:
+		return CreatePlan(op.Cast<LogicalReset>());
+	case LogicalOperatorType::LOGICAL_PIVOT:
+		return CreatePlan(op.Cast<LogicalPivot>());
+	case LogicalOperatorType::LOGICAL_COPY_DATABASE:
+		return CreatePlan(op.Cast<LogicalCopyDatabase>());
+	case LogicalOperatorType::LOGICAL_UPDATE_EXTENSIONS:
+		return CreatePlan(op.Cast<LogicalSimple>());
+	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR: {
+		auto &extension_op = op.Cast<LogicalExtensionOperator>();
+		return extension_op.CreatePlan(context, *this);
+	}
+	case LogicalOperatorType::LOGICAL_JOIN:
+	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:
+	case LogicalOperatorType::LOGICAL_INVALID: {
 		throw NotImplementedException("Unimplemented logical operator type!");
 	}
 	}
+	throw InternalException("Physical plan generator - no plan generated");
+}
 
-	if (op.estimated_props) {
-		plan->estimated_cardinality = op.estimated_props->GetCardinality<idx_t>();
-		plan->estimated_props = op.estimated_props->Copy();
-	} else {
-		plan->estimated_props = make_unique<EstimatedProperties>();
+ArenaAllocator &PhysicalPlanGenerator::ArenaRef() {
+	if (!physical_plan) {
+		physical_plan = make_uniq<PhysicalPlan>(Allocator::Get(context));
 	}
-
-	return plan;
+	return physical_plan->ArenaRef();
 }
 
 } // namespace duckdb

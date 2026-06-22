@@ -1,29 +1,20 @@
-#include "duckdb/common/field_writer.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
+
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
-void LogicalExpressionGet::Serialize(FieldWriter &writer) const {
-	writer.WriteField(table_index);
-	writer.WriteRegularSerializableList(expr_types);
-
-	writer.WriteField<idx_t>(expressions.size());
-	for (auto &entry : expressions) {
-		writer.WriteSerializableList(entry);
-	}
+vector<TableIndex> LogicalExpressionGet::GetTableIndex() const {
+	return vector<TableIndex> {table_index};
 }
 
-unique_ptr<LogicalOperator> LogicalExpressionGet::Deserialize(LogicalDeserializationState &state, FieldReader &reader) {
-	auto table_index = reader.ReadRequired<idx_t>();
-	auto expr_types = reader.ReadRequiredSerializableList<LogicalType, LogicalType>();
-
-	auto expressions_size = reader.ReadRequired<idx_t>();
-	vector<vector<unique_ptr<Expression>>> expressions;
-	for (idx_t i = 0; i < expressions_size; i++) {
-		expressions.push_back(reader.ReadRequiredSerializableList<Expression>(state.gstate));
+string LogicalExpressionGet::GetName() const {
+#ifdef DEBUG
+	if (DBConfigOptions::debug_print_bindings) {
+		return LogicalOperator::GetName() + StringUtil::Format(" #%llu", table_index.index);
 	}
-
-	return make_unique<LogicalExpressionGet>(table_index, expr_types, move(expressions));
+#endif
+	return LogicalOperator::GetName();
 }
 
 } // namespace duckdb

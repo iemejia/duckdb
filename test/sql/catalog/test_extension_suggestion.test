@@ -2,14 +2,11 @@
 # description: The error messages that suggests extension to be installed
 # group: [catalog]
 
-require test_helper
-
 require skip_reload
 
-statement error
-SELECT get_substrait("select 1");
+require no_extension_autoloading "EXPECTED: This tests what happens when extension is not there"
 
-query I
-SELECT test_helper_last_error() LIKE '%Catalog Error: Function with name get_substrait is not on the catalog, but it exists in the substrait extension. To Install and Load the extension, run: INSTALL substrait; LOAD substrait;%'
+statement error
+SELECT from_json('{DATA_DIR}/json/array_of_empty_arrays.json');
 ----
-true
+Catalog Error: Scalar Function with name "from_json" is not in the catalog, but it exists in the json extension.

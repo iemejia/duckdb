@@ -2,11 +2,6 @@
 # description: Update the same value multiple times in one transaction
 # group: [update]
 
-require skip_reload
-
-statement ok
-PRAGMA enable_verification
-
 # create a table
 statement ok con1
 CREATE TABLE test (a INTEGER);
@@ -114,6 +109,7 @@ SELECT * FROM test ORDER BY a
 # test concurrent update in con2, it should fail now
 statement error con2
 UPDATE test SET a=a+1
+----
 
 query I con2
 SELECT * FROM test ORDER BY a
@@ -136,6 +132,7 @@ SELECT * FROM test ORDER BY a
 # test concurrent update in con2, it should fail now
 statement error con2
 UPDATE test SET a=a+1
+----
 
 query I con2
 SELECT * FROM test ORDER BY a
@@ -158,6 +155,7 @@ SELECT * FROM test ORDER BY a
 # test concurrent update in con2, it should fail now
 statement error con2
 UPDATE test SET a=a+1
+----
 
 query I con2
 SELECT * FROM test ORDER BY a

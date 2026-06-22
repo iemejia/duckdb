@@ -14,14 +14,14 @@
 
 namespace duckdb {
 class DatabaseInstance;
-class Transaction;
+class MetaTransaction;
 
 class ValidChecker {
 public:
-	ValidChecker();
+	explicit ValidChecker(DatabaseInstance &db);
 
 	DUCKDB_API static ValidChecker &Get(DatabaseInstance &db);
-	DUCKDB_API static ValidChecker &Get(Transaction &transaction);
+	DUCKDB_API static ValidChecker &Get(MetaTransaction &transaction);
 
 	DUCKDB_API void Invalidate(string error);
 	DUCKDB_API bool IsInvalidated();
@@ -33,7 +33,7 @@ public:
 	}
 	template <class T>
 	static void Invalidate(T &o, string error) {
-		Get(o).Invalidate(move(error));
+		Get(o).Invalidate(std::move(error));
 	}
 
 	template <class T>
@@ -42,10 +42,13 @@ public:
 	}
 
 private:
-	//! Set to true if a fatal exception has occurred
 	mutex invalidate_lock;
+	//! Set to true when encountering a fatal exception.
 	atomic<bool> is_invalidated;
+	//! The message invalidating the database instance.
 	string invalidated_msg;
+	//! The database instance.
+	DatabaseInstance &db;
 };
 
 } // namespace duckdb

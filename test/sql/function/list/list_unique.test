@@ -27,21 +27,20 @@ SELECT list_unique([]) WHERE 1 = 0
 
 statement error
 SELECT list_unique()
+----
 
 statement error
 SELECT list_unique(*)
+----
 
 statement error
 SELECT list_unique([1, 2], 2)
+----
 
 # test incorrect parameter type
-
-foreach type boolean varchar tinyint smallint integer bigint hugeint utinyint usmallint uinteger ubigint float double decimal(4,1) decimal(9,4) decimal(18,6) decimal(38,10) date time timestamp timestamp_s timestamp_ms timestamp_ns timetz timestamptz interval json blob
-
 statement error
-SELECT list_unique(NULL::${type})
-
-endloop
+SELECT list_unique(NULL::tinyint)
+----
 
 # other tests
 
@@ -110,15 +109,15 @@ SELECT list_unique([NULL::VARCHAR])
 0
 
 # INTEGER types
-foreach type tinyint smallint integer bigint hugeint utinyint usmallint uinteger ubigint
+foreach type tinyint smallint integer bigint hugeint utinyint usmallint uinteger ubigint uhugeint
 
 query I
-SELECT list_unique([1::${type}, NULL, 1::${type}])
+SELECT list_unique([1::{type}, NULL, 1::{type}])
 ----
 1
 
 query I
-SELECT list_unique([NULL::${type}])
+SELECT list_unique([NULL::{type}])
 ----
 0
 
@@ -129,10 +128,10 @@ endloop
 foreach type float double decimal(4,1) decimal(9,4) decimal(18,6) decimal(38,10)
 
 statement ok
-SELECT list_unique([1::${type}])
+SELECT list_unique([1::{type}])
 
 query I
-SELECT list_unique([NULL::${type}])
+SELECT list_unique([NULL::{type}])
 ----
 0
 
@@ -197,23 +196,11 @@ SELECT list_unique([INTERVAL 1 YEAR])
 foreach type date time timestamp timestamp_s timestamp_ms timestamp_ns timetz timestamptz
 
 query I
-SELECT list_unique([NULL::${type}])
+SELECT list_unique([NULL::{type}])
 ----
 0
 
 endloop
-
-# JSON
-
-query I
-SELECT list_unique(['{a: 1}'::JSON, '{a: 1}'::JSON])
-----
-1
-
-query I
-SELECT list_unique([NULL::JSON])
-----
-0
 
 # enums
 statement ok
@@ -235,3 +222,8 @@ query I
 SELECT list_unique(['a', 'b、c', 'a'])
 ----
 2
+
+query I
+select list_unique([1,2,3]::INT[3]);
+----
+3

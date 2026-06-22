@@ -2,9 +2,6 @@
 # description: Test generated columns with the UNIQUE constraint
 # group: [virtual]
 
-statement ok
-PRAGMA enable_verification
-
 #Unique constraint not supported yet (SQLite supports it, so it is planned)
 
 # Not supported appended to the column definition
@@ -13,6 +10,8 @@ CREATE TABLE unit (
 	price INTEGER,
 	amount_sold AS (price) UNIQUE,
 );
+----
+<REGEX>:.*Binder Error.*not supported yet.*
 
 # Also not as a column list
 statement error
@@ -21,6 +20,8 @@ CREATE TABLE unit (
 	amount_sold AS (price),
 	UNIQUE (amount_sold),
 );
+----
+<REGEX>:.*Binder Error.*not supported yet.*
 
 # Show that proper UNIQUE constraints still work when mixed in when generated columns
 statement ok
@@ -36,3 +37,5 @@ INSERT INTO tbl VALUES (5);
 # Violates unique constraint
 statement error
 INSERT INTO tbl VALUES (5);
+----
+<REGEX>:.*Constraint Error.*Duplicate key.*

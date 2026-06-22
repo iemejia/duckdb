@@ -1,90 +1,61 @@
 #include "duckdb/parser/result_modifier.hpp"
-#include "duckdb/common/field_writer.hpp"
 #include "duckdb/parser/expression_util.hpp"
 
 namespace duckdb {
 
-bool ResultModifier::Equals(const ResultModifier *other) const {
-	if (!other) {
-		return false;
-	}
-	return type == other->type;
+bool ResultModifier::Equals(const ResultModifier &other) const {
+	return type == other.type;
 }
 
-void ResultModifier::Serialize(Serializer &serializer) const {
-	FieldWriter writer(serializer);
-	writer.WriteField<ResultModifierType>(type);
-	Serialize(writer);
-	writer.Finalize();
-}
-
-unique_ptr<ResultModifier> ResultModifier::Deserialize(Deserializer &source) {
-	FieldReader reader(source);
-	auto type = reader.ReadRequired<ResultModifierType>();
-
-	unique_ptr<ResultModifier> result;
-	switch (type) {
-	case ResultModifierType::LIMIT_MODIFIER:
-		result = LimitModifier::Deserialize(reader);
-		break;
-	case ResultModifierType::ORDER_MODIFIER:
-		result = OrderModifier::Deserialize(reader);
-		break;
-	case ResultModifierType::DISTINCT_MODIFIER:
-		result = DistinctModifier::Deserialize(reader);
-		break;
-	case ResultModifierType::LIMIT_PERCENT_MODIFIER:
-		result = LimitPercentModifier::Deserialize(reader);
-		break;
-	default:
-		throw InternalException("Unrecognized ResultModifierType for Deserialization");
-	}
-	reader.Finalize();
-	return result;
-}
-
-bool LimitModifier::Equals(const ResultModifier *other_p) const {
+bool LimitModifier::Equals(const ResultModifier &other_p) const {
 	if (!ResultModifier::Equals(other_p)) {
 		return false;
 	}
-	auto &other = (LimitModifier &)*other_p;
-	if (!BaseExpression::Equals(limit.get(), other.limit.get())) {
+	auto &other = other_p.Cast<LimitModifier>();
+	if (limit_type != other.limit_type) {
 		return false;
 	}
-	if (!BaseExpression::Equals(offset.get(), other.offset.get())) {
+	if (!ParsedExpression::Equals(limit, other.limit)) {
+		return false;
+	}
+	if (!ParsedExpression::Equals(offset, other.offset)) {
 		return false;
 	}
 	return true;
 }
 
 unique_ptr<ResultModifier> LimitModifier::Copy() const {
-	auto copy = make_unique<LimitModifier>();
+	auto copy = make_uniq<LimitModifier>();
+	copy->limit_type = limit_type;
 	if (limit) {
 		copy->limit = limit->Copy();
 	}
 	if (offset) {
 		copy->offset = offset->Copy();
 	}
-	return move(copy);
+	return std::move(copy);
 }
 
-void LimitModifier::Serialize(FieldWriter &writer) const {
-	writer.WriteOptional(limit);
-	writer.WriteOptional(offset);
+bool LimitModifier::UseLegacySerialization() const {
+	return limit_type == LimitValueType::PERCENTAGE;
 }
 
-unique_ptr<ResultModifier> LimitModifier::Deserialize(FieldReader &reader) {
-	auto mod = make_unique<LimitModifier>();
-	mod->limit = reader.ReadOptional<ParsedExpression>(nullptr);
-	mod->offset = reader.ReadOptional<ParsedExpression>(nullptr);
-	return move(mod);
+void LimitModifier::LegacySerialize(Serializer &serializer) const {
+	LegacyLimitPercentModifier legacy_serialization;
+	if (limit) {
+		legacy_serialization.limit = limit->Copy();
+	}
+	if (offset) {
+		legacy_serialization.offset = offset->Copy();
+	}
+	legacy_serialization.Serialize(serializer);
 }
 
-bool DistinctModifier::Equals(const ResultModifier *other_p) const {
+bool DistinctModifier::Equals(const ResultModifier &other_p) const {
 	if (!ResultModifier::Equals(other_p)) {
 		return false;
 	}
-	auto &other = (DistinctModifier &)*other_p;
+	auto &other = other_p.Cast<DistinctModifier>();
 	if (!ExpressionUtil::ListEquals(distinct_on_targets, other.distinct_on_targets)) {
 		return false;
 	}
@@ -92,28 +63,18 @@ bool DistinctModifier::Equals(const ResultModifier *other_p) const {
 }
 
 unique_ptr<ResultModifier> DistinctModifier::Copy() const {
-	auto copy = make_unique<DistinctModifier>();
+	auto copy = make_uniq<DistinctModifier>();
 	for (auto &expr : distinct_on_targets) {
 		copy->distinct_on_targets.push_back(expr->Copy());
 	}
-	return move(copy);
+	return std::move(copy);
 }
 
-void DistinctModifier::Serialize(FieldWriter &writer) const {
-	writer.WriteSerializableList(distinct_on_targets);
-}
-
-unique_ptr<ResultModifier> DistinctModifier::Deserialize(FieldReader &reader) {
-	auto mod = make_unique<DistinctModifier>();
-	mod->distinct_on_targets = reader.ReadRequiredSerializableList<ParsedExpression>();
-	return move(mod);
-}
-
-bool OrderModifier::Equals(const ResultModifier *other_p) const {
+bool OrderModifier::Equals(const ResultModifier &other_p) const {
 	if (!ResultModifier::Equals(other_p)) {
 		return false;
 	}
-	auto &other = (OrderModifier &)*other_p;
+	auto &other = other_p.Cast<OrderModifier>();
 	if (orders.size() != other.orders.size()) {
 		return false;
 	}
@@ -121,19 +82,29 @@ bool OrderModifier::Equals(const ResultModifier *other_p) const {
 		if (orders[i].type != other.orders[i].type) {
 			return false;
 		}
-		if (!BaseExpression::Equals(orders[i].expression.get(), other.orders[i].expression.get())) {
+		if (!BaseExpression::Equals(*orders[i].expression, *other.orders[i].expression)) {
 			return false;
 		}
 	}
 	return true;
 }
 
+bool OrderModifier::Equals(const unique_ptr<OrderModifier> &left, const unique_ptr<OrderModifier> &right) {
+	if (left.get() == right.get()) {
+		return true;
+	}
+	if (!left || !right) {
+		return false;
+	}
+	return left->Equals(*right);
+}
+
 unique_ptr<ResultModifier> OrderModifier::Copy() const {
-	auto copy = make_unique<OrderModifier>();
+	auto copy = make_uniq<OrderModifier>();
 	for (auto &order : orders) {
 		copy->orders.emplace_back(order.type, order.null_order, order.expression->Copy());
 	}
-	return move(copy);
+	return std::move(copy);
 }
 
 string OrderByNode::ToString() const {
@@ -162,68 +133,22 @@ string OrderByNode::ToString() const {
 	return str;
 }
 
-void OrderByNode::Serialize(Serializer &serializer) const {
-	FieldWriter writer(serializer);
-	writer.WriteField<OrderType>(type);
-	writer.WriteField<OrderByNullType>(null_order);
-	writer.WriteSerializable(*expression);
-	writer.Finalize();
+bool LegacyLimitPercentModifier::Equals(const ResultModifier &other) const {
+	throw InternalException("Legacy Limit Percent modifier should not be used anymore");
 }
 
-OrderByNode OrderByNode::Deserialize(Deserializer &source) {
-	FieldReader reader(source);
-	auto type = reader.ReadRequired<OrderType>();
-	auto null_order = reader.ReadRequired<OrderByNullType>();
-	auto expression = reader.ReadRequiredSerializable<ParsedExpression>();
-	reader.Finalize();
-	return OrderByNode(type, null_order, move(expression));
+unique_ptr<ResultModifier> LegacyLimitPercentModifier::Copy() const {
+	throw InternalException("Legacy Limit Percent modifier should not be used anymore");
 }
 
-void OrderModifier::Serialize(FieldWriter &writer) const {
-	writer.WriteRegularSerializableList(orders);
-}
-
-unique_ptr<ResultModifier> OrderModifier::Deserialize(FieldReader &reader) {
-	auto mod = make_unique<OrderModifier>();
-	mod->orders = reader.ReadRequiredSerializableList<OrderByNode, OrderByNode>();
-	return move(mod);
-}
-
-bool LimitPercentModifier::Equals(const ResultModifier *other_p) const {
-	if (!ResultModifier::Equals(other_p)) {
-		return false;
-	}
-	auto &other = (LimitPercentModifier &)*other_p;
-	if (!BaseExpression::Equals(limit.get(), other.limit.get())) {
-		return false;
-	}
-	if (!BaseExpression::Equals(offset.get(), other.offset.get())) {
-		return false;
-	}
-	return true;
-}
-
-unique_ptr<ResultModifier> LimitPercentModifier::Copy() const {
-	auto copy = make_unique<LimitPercentModifier>();
-	if (limit) {
-		copy->limit = limit->Copy();
-	}
-	if (offset) {
-		copy->offset = offset->Copy();
-	}
-	return move(copy);
-}
-
-void LimitPercentModifier::Serialize(FieldWriter &writer) const {
-	writer.WriteOptional(limit);
-	writer.WriteOptional(offset);
-}
-
-unique_ptr<ResultModifier> LimitPercentModifier::Deserialize(FieldReader &reader) {
-	auto mod = make_unique<LimitPercentModifier>();
-	mod->limit = reader.ReadOptional<ParsedExpression>(nullptr);
-	mod->offset = reader.ReadOptional<ParsedExpression>(nullptr);
-	return move(mod);
+unique_ptr<ResultModifier>
+LegacyLimitPercentModifier::DeserializeLegacyLimitPercentModifier(unique_ptr<ParsedExpression> limit_p,
+                                                                  unique_ptr<ParsedExpression> offset_p) {
+	auto result = make_uniq<LimitModifier>();
+	result->limit = std::move(limit_p);
+	result->offset = std::move(offset_p);
+	result->limit_type = LimitValueType::PERCENTAGE;
+	return std::move(result);
 }
 
 } // namespace duckdb

@@ -3,9 +3,6 @@
 # group: [virtual]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE unit (
 	price INTEGER,
 	amount_sold INTEGER,
@@ -33,6 +30,7 @@ CREATE TABLE tbl2 (
 	circular INTEGER AS (dependency),
 	dependency INTEGER AS (circular)
 );
+----
 
 # Type is resolved, regardless of order
 statement ok

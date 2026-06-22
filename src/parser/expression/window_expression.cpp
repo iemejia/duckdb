@@ -1,165 +1,209 @@
 #include "duckdb/parser/expression/window_expression.hpp"
-
-#include "duckdb/common/limits.hpp"
-#include "duckdb/common/field_writer.hpp"
-#include "duckdb/common/string_util.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
 
 namespace duckdb {
 
-WindowExpression::WindowExpression(ExpressionType type, string schema, const string &function_name)
-    : ParsedExpression(type, ExpressionClass::WINDOW), schema(move(schema)),
-      function_name(StringUtil::Lower(function_name)), ignore_nulls(false) {
-	switch (type) {
-	case ExpressionType::WINDOW_AGGREGATE:
-	case ExpressionType::WINDOW_ROW_NUMBER:
-	case ExpressionType::WINDOW_FIRST_VALUE:
-	case ExpressionType::WINDOW_LAST_VALUE:
-	case ExpressionType::WINDOW_NTH_VALUE:
-	case ExpressionType::WINDOW_RANK:
-	case ExpressionType::WINDOW_RANK_DENSE:
-	case ExpressionType::WINDOW_PERCENT_RANK:
-	case ExpressionType::WINDOW_CUME_DIST:
-	case ExpressionType::WINDOW_LEAD:
-	case ExpressionType::WINDOW_LAG:
-	case ExpressionType::WINDOW_NTILE:
-		break;
-	default:
-		throw NotImplementedException("Window aggregate type %s not supported", ExpressionTypeToString(type).c_str());
+WindowExpression::WindowExpression() : ParsedExpression(ExpressionType::INVALID, ExpressionClass::WINDOW) {
+}
+
+vector<unique_ptr<ParsedExpression>> WindowExpression::SerializedChildren(Serializer &serializer) const {
+	vector<unique_ptr<ParsedExpression>> result;
+	idx_t nargs = arguments.size();
+	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) && (function_name == "lead" || function_name == "lag")) {
+		nargs = 1;
 	}
+
+	for (idx_t i = 0; i < nargs; ++i) {
+		result.emplace_back(arguments[i].GetExpression().Copy());
+	}
+
+	return result;
+}
+
+unique_ptr<ParsedExpression> WindowExpression::SerializedOffset(Serializer &serializer) const {
+	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) && arguments.size() > 1 &&
+	    (function_name == "lead" || function_name == "lag")) {
+		return arguments[1].GetExpression().Copy();
+	}
+
+	return nullptr;
+}
+
+unique_ptr<ParsedExpression> WindowExpression::SerializedDefault(Serializer &serializer) const {
+	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) && arguments.size() > 2 &&
+	    (function_name == "lead" || function_name == "lag")) {
+		return arguments[2].GetExpression().Copy();
+	}
+
+	return nullptr;
+}
+
+WindowExpression::WindowExpression(const string &catalog_name, const string &schema, const string &function_name)
+    : ParsedExpression(WindowToExpressionType(function_name), ExpressionClass::WINDOW), catalog(catalog_name),
+      schema(schema), function_name(StringUtil::Lower(function_name)), ignore_nulls(false), distinct(false) {
+}
+
+struct WindowFunctionDefinition {
+	const char *name;
+	ExpressionType expression_type;
+};
+
+static const WindowFunctionDefinition internal_window_functions[] = {
+    {"rank", ExpressionType::WINDOW_RANK},
+    {"rank_dense", ExpressionType::WINDOW_RANK_DENSE},
+    {"dense_rank", ExpressionType::WINDOW_RANK_DENSE},
+    {"percent_rank", ExpressionType::WINDOW_PERCENT_RANK},
+    {"row_number", ExpressionType::WINDOW_ROW_NUMBER},
+    {"first_value", ExpressionType::WINDOW_FIRST_VALUE},
+    {"last_value", ExpressionType::WINDOW_LAST_VALUE},
+    {"nth_value", ExpressionType::WINDOW_NTH_VALUE},
+    {"cume_dist", ExpressionType::WINDOW_CUME_DIST},
+    {"lead", ExpressionType::WINDOW_LEAD},
+    {"lag", ExpressionType::WINDOW_LAG},
+    {"ntile", ExpressionType::WINDOW_NTILE},
+    {"fill", ExpressionType::WINDOW_FILL},
+    {nullptr, ExpressionType::INVALID}};
+
+ExpressionType WindowExpression::WindowToExpressionType(const string &fun_name) {
+	D_ASSERT(StringUtil::IsLower(fun_name));
+	auto functions = internal_window_functions;
+	for (idx_t i = 0; functions[i].name != nullptr; i++) {
+		if (fun_name == functions[i].name) {
+			return functions[i].expression_type;
+		}
+	}
+	return ExpressionType::WINDOW_AGGREGATE;
+}
+
+string WindowExpression::ExpressionTypeToWindow(ExpressionType expression_type) {
+	auto functions = internal_window_functions;
+	for (idx_t i = 0; functions[i].name != nullptr; i++) {
+		if (expression_type == functions[i].expression_type) {
+			return functions[i].name;
+		}
+	}
+	return "";
+}
+
+void WindowExpression::SetFunctionName(const string &function_name_p) {
+	function_name = Identifier(function_name_p);
+	type = WindowToExpressionType(function_name.GetIdentifierName());
 }
 
 string WindowExpression::ToString() const {
-	return ToString<WindowExpression, ParsedExpression, OrderByNode>(*this, schema, function_name);
+	return ToString<WindowExpression, ParsedExpression, OrderByNode>(*this, schema.GetIdentifierName(),
+	                                                                 function_name.GetIdentifierName());
 }
 
-bool WindowExpression::Equals(const WindowExpression *a, const WindowExpression *b) {
-	// check if the child expressions are equivalent
-	if (b->children.size() != a->children.size()) {
-		return false;
-	}
-	if (a->ignore_nulls != b->ignore_nulls) {
-		return false;
-	}
-	for (idx_t i = 0; i < a->children.size(); i++) {
-		if (!a->children[i]->Equals(b->children[i].get())) {
-			return false;
+bool WindowExpression::HasBoundedParts() const {
+	for (auto &child : arguments) {
+		if (child.GetExpression().GetExpressionClass() == ExpressionClass::BOUND_EXPRESSION) {
+			return true;
 		}
 	}
-	if (a->start != b->start || a->end != b->end) {
-		return false;
-	}
-	// check if the framing expressions are equivalent
-	if (!BaseExpression::Equals(a->start_expr.get(), b->start_expr.get()) ||
-	    !BaseExpression::Equals(a->end_expr.get(), b->end_expr.get()) ||
-	    !BaseExpression::Equals(a->offset_expr.get(), b->offset_expr.get()) ||
-	    !BaseExpression::Equals(a->default_expr.get(), b->default_expr.get())) {
-		return false;
-	}
-
-	// check if the partitions are equivalent
-	if (a->partitions.size() != b->partitions.size()) {
-		return false;
-	}
-	for (idx_t i = 0; i < a->partitions.size(); i++) {
-		if (!a->partitions[i]->Equals(b->partitions[i].get())) {
-			return false;
+	for (auto &partition : partitions) {
+		if ((*partition).GetExpressionClass() == ExpressionClass::BOUND_EXPRESSION) {
+			return true;
 		}
-	}
-	// check if the orderings are equivalent
-	if (a->orders.size() != b->orders.size()) {
-		return false;
-	}
-	for (idx_t i = 0; i < a->orders.size(); i++) {
-		if (a->orders[i].type != b->orders[i].type) {
-			return false;
-		}
-		if (!a->orders[i].expression->Equals(b->orders[i].expression.get())) {
-			return false;
-		}
-	}
-	// check if the filter clauses are equivalent
-	if (!BaseExpression::Equals(a->filter_expr.get(), b->filter_expr.get())) {
-		return false;
-	}
-
-	return true;
-}
-
-unique_ptr<ParsedExpression> WindowExpression::Copy() const {
-	auto new_window = make_unique<WindowExpression>(type, schema, function_name);
-	new_window->CopyProperties(*this);
-
-	for (auto &child : children) {
-		new_window->children.push_back(child->Copy());
-	}
-
-	for (auto &e : partitions) {
-		new_window->partitions.push_back(e->Copy());
 	}
 
 	for (auto &o : orders) {
-		new_window->orders.emplace_back(o.type, o.null_order, o.expression->Copy());
+		if ((*o.expression).GetExpressionClass() == ExpressionClass::BOUND_EXPRESSION) {
+			return true;
+		}
 	}
 
-	new_window->filter_expr = filter_expr ? filter_expr->Copy() : nullptr;
-
-	new_window->start = start;
-	new_window->end = end;
-	new_window->start_expr = start_expr ? start_expr->Copy() : nullptr;
-	new_window->end_expr = end_expr ? end_expr->Copy() : nullptr;
-	new_window->offset_expr = offset_expr ? offset_expr->Copy() : nullptr;
-	new_window->default_expr = default_expr ? default_expr->Copy() : nullptr;
-	new_window->ignore_nulls = ignore_nulls;
-
-	return move(new_window);
+	for (auto &o : arg_orders) {
+		if ((*o.expression).GetExpressionClass() == ExpressionClass::BOUND_EXPRESSION) {
+			return true;
+		}
+	}
+	return false;
 }
 
-void WindowExpression::Serialize(FieldWriter &writer) const {
-	auto &serializer = writer.GetSerializer();
+void WindowExpression::Serialize(Serializer &serializer) const {
+	ParsedExpression::Serialize(serializer);
+	serializer.WritePropertyWithDefault<Identifier>(200, "function_name", function_name);
+	serializer.WritePropertyWithDefault<Identifier>(201, "schema", schema);
+	serializer.WritePropertyWithDefault<Identifier>(202, "catalog", catalog);
 
-	writer.WriteString(function_name);
-	writer.WriteString(schema);
-	writer.WriteSerializableList(children);
-	writer.WriteSerializableList(partitions);
-	// FIXME: should not use serializer here (probably)?
-	D_ASSERT(orders.size() <= NumericLimits<uint32_t>::Maximum());
-	writer.WriteField<uint32_t>((uint32_t)orders.size());
-	for (auto &order : orders) {
-		order.Serialize(serializer);
+	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0)) {
+		// Legacy serialization.
+		vector<unique_ptr<ParsedExpression>> children;
+		for (auto &arg : arguments) {
+			auto copy = arg.GetExpression().Copy();
+			copy->SetAlias(arg.GetName());
+			children.push_back(std::move(copy));
+		}
+		serializer.WritePropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(203, "children", children);
 	}
-	writer.WriteField<WindowBoundary>(start);
-	writer.WriteField<WindowBoundary>(end);
 
-	writer.WriteOptional(start_expr);
-	writer.WriteOptional(end_expr);
-	writer.WriteOptional(offset_expr);
-	writer.WriteOptional(default_expr);
-	writer.WriteField<bool>(ignore_nulls);
-	writer.WriteOptional(filter_expr);
+	serializer.WritePropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(204, "partitions", partitions);
+	serializer.WritePropertyWithDefault<vector<OrderByNode>>(205, "orders", orders);
+	serializer.WriteProperty<WindowBoundary>(206, "start", start);
+	serializer.WriteProperty<WindowBoundary>(207, "end", end);
+	serializer.WritePropertyWithDefault<unique_ptr<ParsedExpression>>(208, "start_expr", start_expr);
+	serializer.WritePropertyWithDefault<unique_ptr<ParsedExpression>>(209, "end_expr", end_expr);
+	serializer.WritePropertyWithDefault<unique_ptr<ParsedExpression>>(210, "offset_expr", SerializedOffset(serializer));
+	serializer.WritePropertyWithDefault<unique_ptr<ParsedExpression>>(211, "default_expr",
+	                                                                  SerializedDefault(serializer));
+	serializer.WritePropertyWithDefault<bool>(212, "ignore_nulls", ignore_nulls);
+	serializer.WritePropertyWithDefault<unique_ptr<ParsedExpression>>(213, "filter_expr", filter_expr);
+	serializer.WritePropertyWithDefault<WindowExcludeMode>(214, "exclude_clause", exclude_clause,
+	                                                       WindowExcludeMode::NO_OTHER);
+	serializer.WritePropertyWithDefault<bool>(215, "distinct", distinct);
+	serializer.WritePropertyWithDefault<vector<OrderByNode>>(216, "arg_orders", arg_orders);
+	if (serializer.ShouldSerialize(StorageVersion::V2_0_0)) {
+		serializer.WritePropertyWithDefault<bool>(217, "has_ignore_nulls", has_ignore_nulls);
+	}
+
+	if (serializer.ShouldSerialize(StorageVersion::V2_0_0)) {
+		serializer.WritePropertyWithDefault<vector<FunctionArgument>>(218, "arguments", arguments);
+	}
 }
 
-unique_ptr<ParsedExpression> WindowExpression::Deserialize(ExpressionType type, FieldReader &reader) {
-	auto function_name = reader.ReadRequired<string>();
-	auto schema = reader.ReadRequired<string>();
-	auto expr = make_unique<WindowExpression>(type, schema, function_name);
-	expr->children = reader.ReadRequiredSerializableList<ParsedExpression>();
-	expr->partitions = reader.ReadRequiredSerializableList<ParsedExpression>();
+unique_ptr<ParsedExpression> WindowExpression::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<WindowExpression>(new WindowExpression());
+	deserializer.ReadPropertyWithDefault<Identifier>(200, "function_name", result->function_name);
+	deserializer.ReadPropertyWithDefault<Identifier>(201, "schema", result->schema);
+	deserializer.ReadPropertyWithDefault<Identifier>(202, "catalog", result->catalog);
 
-	auto order_count = reader.ReadRequired<uint32_t>();
-	auto &source = reader.GetSource();
-	for (idx_t i = 0; i < order_count; i++) {
-		expr->orders.push_back(OrderByNode::Deserialize(source));
+	// Legacy children deserialization
+	vector<unique_ptr<ParsedExpression>> children;
+	deserializer.ReadPropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(203, "children", children);
+	if (!children.empty()) {
+		result->arguments.reserve(children.size());
+		for (auto &child : children) {
+			auto alias = child->GetAlias();
+			result->arguments.emplace_back(std::move(alias), std::move(child));
+		}
+		// Mark this function expression as a legacy function call, so that the binder can handle it accordingly.
+		result->is_legacy_function_call = true;
 	}
-	expr->start = reader.ReadRequired<WindowBoundary>();
-	expr->end = reader.ReadRequired<WindowBoundary>();
 
-	expr->start_expr = reader.ReadOptional<ParsedExpression>(nullptr);
-	expr->end_expr = reader.ReadOptional<ParsedExpression>(nullptr);
-	expr->offset_expr = reader.ReadOptional<ParsedExpression>(nullptr);
-	expr->default_expr = reader.ReadOptional<ParsedExpression>(nullptr);
-	expr->ignore_nulls = reader.ReadRequired<bool>();
-	expr->filter_expr = reader.ReadOptional<ParsedExpression>(nullptr);
-	return move(expr);
+	deserializer.ReadPropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(204, "partitions", result->partitions);
+	deserializer.ReadPropertyWithDefault<vector<OrderByNode>>(205, "orders", result->orders);
+	deserializer.ReadProperty<WindowBoundary>(206, "start", result->start);
+	deserializer.ReadProperty<WindowBoundary>(207, "end", result->end);
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(208, "start_expr", result->start_expr);
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(209, "end_expr", result->end_expr);
+	deserializer.ReadDeletedProperty<unique_ptr<ParsedExpression>>(210, "offset_expr");
+	deserializer.ReadDeletedProperty<unique_ptr<ParsedExpression>>(211, "default_expr");
+	deserializer.ReadPropertyWithDefault<bool>(212, "ignore_nulls", result->ignore_nulls);
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(213, "filter_expr", result->filter_expr);
+	deserializer.ReadPropertyWithExplicitDefault<WindowExcludeMode>(214, "exclude_clause", result->exclude_clause,
+	                                                                WindowExcludeMode::NO_OTHER);
+	deserializer.ReadPropertyWithDefault<bool>(215, "distinct", result->distinct);
+	deserializer.ReadPropertyWithDefault<vector<OrderByNode>>(216, "arg_orders", result->arg_orders);
+	deserializer.ReadPropertyWithDefault<bool>(217, "has_ignore_nulls", result->has_ignore_nulls);
+
+	// New children deserialization
+	if (children.empty()) {
+		deserializer.ReadPropertyWithDefault<vector<FunctionArgument>>(218, "arguments", result->arguments);
+	}
+
+	return std::move(result);
 }
 
 } // namespace duckdb

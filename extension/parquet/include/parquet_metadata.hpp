@@ -9,6 +9,7 @@
 #pragma once
 
 #include "parquet_reader.hpp"
+#include "duckdb/function/function_set.hpp"
 
 namespace duckdb {
 
@@ -20,6 +21,26 @@ public:
 class ParquetSchemaFunction : public TableFunction {
 public:
 	ParquetSchemaFunction();
+};
+
+class ParquetKeyValueMetadataFunction : public TableFunction {
+public:
+	ParquetKeyValueMetadataFunction();
+};
+
+class ParquetFileMetadataFunction : public TableFunction {
+public:
+	ParquetFileMetadataFunction();
+};
+
+class ParquetBloomProbeFunction : public TableFunction {
+public:
+	ParquetBloomProbeFunction();
+};
+
+class ParquetFullMetadataFunction : public TableFunction {
+public:
+	ParquetFullMetadataFunction();
 };
 
 } // namespace duckdb

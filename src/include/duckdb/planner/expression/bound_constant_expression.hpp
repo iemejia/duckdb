@@ -15,19 +15,29 @@ namespace duckdb {
 
 class BoundConstantExpression : public Expression {
 public:
-	explicit BoundConstantExpression(Value value);
-
-	Value value;
+	static constexpr const ExpressionClass TYPE = ExpressionClass::BOUND_CONSTANT;
 
 public:
+	explicit BoundConstantExpression(Value value);
+
+public:
+	const Value &GetValue() const {
+		return value;
+	}
+	Value &GetValueMutable() {
+		return value;
+	}
 	string ToString() const override;
 
-	bool Equals(const BaseExpression *other) const override;
+	bool Equals(const BaseExpression &other) const override;
 	hash_t Hash() const override;
 
-	unique_ptr<Expression> Copy() override;
+	unique_ptr<Expression> Copy() const override;
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<Expression> Deserialize(ExpressionDeserializationState &state, FieldReader &reader);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<Expression> Deserialize(Deserializer &deserializer);
+
+private:
+	Value value;
 };
 } // namespace duckdb

@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/catalog/catalog_entry/macro_catalog_entry.hpp
+// duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -17,13 +17,13 @@ namespace duckdb {
 //! A macro function in the catalog
 class TableMacroCatalogEntry : public MacroCatalogEntry {
 public:
-	TableMacroCatalogEntry(Catalog *catalog, SchemaCatalogEntry *schema, CreateMacroInfo *info);
+	static constexpr const CatalogType Type = CatalogType::TABLE_MACRO_ENTRY;
+	static constexpr const char *Name = "table macro function";
 
 public:
-	//! Serialize the meta information of the ScalarMacroCatalogEntry
-	void Serialize(Serializer &serializer) override;
-	//! Deserializes to a CreateMacroInfo
-	static unique_ptr<CreateMacroInfo> Deserialize(Deserializer &source, ClientContext &context);
+	TableMacroCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateMacroInfo &info);
+
+	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
 };
 
 } // namespace duckdb

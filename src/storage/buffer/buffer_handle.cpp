@@ -1,15 +1,19 @@
 #include "duckdb/storage/buffer/buffer_handle.hpp"
+
+#include "duckdb/storage/block_manager.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/buffer/block_handle.hpp"
 
 namespace duckdb {
 
 BufferHandle::BufferHandle() : handle(nullptr), node(nullptr) {
 }
 
-BufferHandle::BufferHandle(shared_ptr<BlockHandle> handle, FileBuffer *node) : handle(move(handle)), node(node) {
+BufferHandle::BufferHandle(shared_ptr<BlockHandle> handle_p, optional_ptr<FileBuffer> node_p)
+    : handle(std::move(handle_p)), node(node_p) {
 }
 
-BufferHandle::BufferHandle(BufferHandle &&other) noexcept {
+BufferHandle::BufferHandle(BufferHandle &&other) noexcept : node(nullptr) {
 	std::swap(node, other.node);
 	std::swap(handle, other.handle);
 }
@@ -28,21 +32,11 @@ bool BufferHandle::IsValid() const {
 	return node != nullptr;
 }
 
-data_ptr_t BufferHandle::Ptr() const {
-	D_ASSERT(IsValid());
-	return node->buffer;
-}
-
-data_ptr_t BufferHandle::Ptr() {
-	D_ASSERT(IsValid());
-	return node->buffer;
-}
-
 void BufferHandle::Destroy() {
 	if (!handle || !IsValid()) {
 		return;
 	}
-	handle->block_manager.buffer_manager.Unpin(handle);
+	handle->GetMemory().GetBufferManager().Unpin(handle);
 	handle.reset();
 	node = nullptr;
 }

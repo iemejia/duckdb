@@ -12,40 +12,70 @@
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/common/thread.hpp"
+#include "duckdb/common/mutex.hpp"
 
 namespace duckdb {
 
 class DataTable;
 struct CreateViewInfo;
 
+enum class ViewBindState { BOUND, BINDING, UNBOUND };
+enum class BindViewAction { BIND_IF_UNBOUND, FORCE_REBIND };
+
+struct ViewColumnInfo {
+	vector<LogicalType> types;
+	vector<Identifier> names;
+};
+
 //! A view catalog entry
 class ViewCatalogEntry : public StandardEntry {
 public:
+	static constexpr const CatalogType Type = CatalogType::VIEW_ENTRY;
+	static constexpr const char *Name = "view";
+
+public:
 	//! Create a real TableCatalogEntry and initialize storage for it
-	ViewCatalogEntry(Catalog *catalog, SchemaCatalogEntry *schema, CreateViewInfo *info);
+	ViewCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateViewInfo &info);
 
 	//! The query of the view
 	unique_ptr<SelectStatement> query;
 	//! The SQL query (if any)
 	string sql;
 	//! The set of aliases associated with the view
-	vector<string> aliases;
-	//! The returned types of the view
-	vector<LogicalType> types;
+	vector<Identifier> aliases;
+
+	//! Returns the view column info, if the view is bound. Otherwise returns `nullptr`
+	virtual shared_ptr<ViewColumnInfo> GetColumnInfo() const;
+	//! Bind a view so we know the types / names returned by it
+	virtual void BindView(ClientContext &context, BindViewAction action = BindViewAction::BIND_IF_UNBOUND);
+	//! Update the view with a new set of types / names
+	virtual void UpdateBinding(const vector<LogicalType> &types, const vector<Identifier> &names);
+	Value GetColumnComment(idx_t column_index);
 
 public:
-	unique_ptr<CatalogEntry> AlterEntry(ClientContext &context, AlterInfo *info) override;
+	unique_ptr<CreateInfo> GetInfo() const override;
 
-	//! Serialize the meta information of the ViewCatalogEntry a serializer
-	virtual void Serialize(Serializer &serializer);
-	//! Deserializes to a CreateTableInfo
-	static unique_ptr<CreateViewInfo> Deserialize(Deserializer &source, ClientContext &context);
+	unique_ptr<CatalogEntry> AlterEntry(ClientContext &context, AlterInfo &info) override;
 
-	unique_ptr<CatalogEntry> Copy(ClientContext &context) override;
+	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
 
-	string ToSQL() override;
+	virtual const SelectStatement &GetQuery();
+
+	string ToSQL() const override;
 
 private:
-	void Initialize(CreateViewInfo *info);
+	mutable mutex bind_lock;
+	//! Columns returned by the view, if bound
+	shared_ptr<ViewColumnInfo> view_columns;
+	//! The current bind state of the view
+	atomic<ViewBindState> bind_state;
+	//! Current binding thread
+	atomic<thread_id> bind_thread;
+	//! The comments on the columns of the view: can be empty if there are no comments
+	identifier_map_t<Value> column_comments;
+
+private:
+	void Initialize(CreateViewInfo &info);
 };
 } // namespace duckdb

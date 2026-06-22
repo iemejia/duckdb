@@ -2,14 +2,14 @@
 # description: Test concat function
 # group: [string]
 
+statement ok
+SET default_null_order='nulls_first';
+
 # Test Case disclaimer
 
 # Assertions built using the Domain Testing technique
 # at: https://bbst.courses/wp-content/uploads/2018/01/Kaner-Intro-to-Domain-Testing-2018.pdf
 
-
-statement ok
-PRAGMA enable_verification
 
 statement ok
 CREATE TABLE strings(s VARCHAR)
@@ -51,6 +51,7 @@ NULL
 # concat requires at least one argument
 statement error
 SELECT CONCAT()
+----
 
 # concat with one argument works
 query T
@@ -77,4 +78,3 @@ SELECT CONCAT('hello', ' ', s) FROM strings ORDER BY s
 hello 
 hello hello
 hello world
-

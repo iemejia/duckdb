@@ -1,36 +1,67 @@
 #include "include/icu-datetrunc.hpp"
 #include "include/icu-datefunc.hpp"
 
-#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
-#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_operations/binary_executor.hpp"
-#include "duckdb/main/client_context.hpp"
-#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 
 namespace duckdb {
 
 struct ICUDateTrunc : public ICUDateFunc {
-	static void TruncMicrosecond(icu::Calendar *calendar, uint64_t &micros) {
+	static void PreserveOffsets(icu::Calendar *calendar) {
+		//	We have to extract _everything_ before setting anything
+		//	Otherwise ICU will clear the fStamp fields
+		//	This also means we must call this method first.
+
+		//	Force reuse of offsets when reassembling truncated sub-hour times.
+		const auto zone_offset = ExtractField(calendar, UCAL_ZONE_OFFSET);
+		const auto dst_offset = ExtractField(calendar, UCAL_DST_OFFSET);
+
+		calendar->set(UCAL_ZONE_OFFSET, zone_offset);
+		calendar->set(UCAL_DST_OFFSET, dst_offset);
 	}
 
-	static void TruncMillisecond(icu::Calendar *calendar, uint64_t &micros) {
-		TruncMicrosecond(calendar, micros);
+	static void TruncMicrosecondInternal(icu::Calendar *calendar, uint64_t &micros) {
+	}
+
+	static void TruncMicrosecond(icu::Calendar *calendar, uint64_t &micros) {
+		PreserveOffsets(calendar);
+		TruncMicrosecondInternal(calendar, micros);
+	}
+
+	static void TruncMillisecondInternal(icu::Calendar *calendar, uint64_t &micros) {
+		TruncMicrosecondInternal(calendar, micros);
 		micros = 0;
 	}
 
-	static void TruncSecond(icu::Calendar *calendar, uint64_t &micros) {
-		TruncMillisecond(calendar, micros);
+	static void TruncMillisecond(icu::Calendar *calendar, uint64_t &micros) {
+		PreserveOffsets(calendar);
+		TruncMillisecondInternal(calendar, micros);
+	}
+
+	static void TruncSecondInternal(icu::Calendar *calendar, uint64_t &micros) {
+		TruncMillisecondInternal(calendar, micros);
 		calendar->set(UCAL_MILLISECOND, 0);
 	}
 
-	static void TruncMinute(icu::Calendar *calendar, uint64_t &micros) {
-		TruncSecond(calendar, micros);
+	static void TruncSecond(icu::Calendar *calendar, uint64_t &micros) {
+		PreserveOffsets(calendar);
+		TruncSecondInternal(calendar, micros);
+	}
+
+	static void TruncMinuteInternal(icu::Calendar *calendar, uint64_t &micros) {
+		TruncSecondInternal(calendar, micros);
 		calendar->set(UCAL_SECOND, 0);
 	}
 
+	static void TruncMinute(icu::Calendar *calendar, uint64_t &micros) {
+		PreserveOffsets(calendar);
+		TruncMinuteInternal(calendar, micros);
+	}
+
 	static void TruncHour(icu::Calendar *calendar, uint64_t &micros) {
-		TruncMinute(calendar, micros);
+		TruncMinuteInternal(calendar, micros);
 		calendar->set(UCAL_MINUTE, 0);
 	}
 
@@ -95,43 +126,40 @@ struct ICUDateTrunc : public ICUDateFunc {
 	template <typename T>
 	static void ICUDateTruncFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		D_ASSERT(args.ColumnCount() == 2);
-		auto &part_arg = args.data[0];
-		auto &date_arg = args.data[1];
+		const auto &part_arg = args.data[0];
+		const auto &date_arg = args.data[1];
 
-		auto &func_expr = (BoundFunctionExpression &)state.expr;
-		auto &info = (BindData &)*func_expr.bind_info;
+		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
 		CalendarPtr calendar(info.calendar->clone());
 
 		if (part_arg.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			// Common case of constant part.
 			if (ConstantVector::IsNull(part_arg)) {
-				result.SetVectorType(VectorType::CONSTANT_VECTOR);
-				ConstantVector::SetNull(result, true);
-			} else {
-				const auto specifier = ConstantVector::GetData<string_t>(part_arg)->GetString();
-				auto truncator = TruncationFactory(GetDatePartSpecifier(specifier));
-				UnaryExecutor::Execute<T, timestamp_t>(date_arg, result, args.size(), [&](T input) {
-					if (Timestamp::IsFinite(input)) {
-						auto micros = SetTime(calendar.get(), input);
-						truncator(calendar.get(), micros);
-						return GetTimeUnsafe(calendar.get(), micros);
-					} else {
-						return input;
-					}
-				});
+				throw InternalException("ICUDateTrunc called with constant NULL bucket width");
 			}
+			const auto specifier = ConstantVector::GetData<string_t>(part_arg)->GetString();
+			auto truncator = TruncationFactory(GetDatePartSpecifier(specifier));
+			UnaryExecutor::Execute<T, T>(date_arg, result, [&](T input) {
+				if (input.IsFinite()) {
+					auto micros = SetTime(calendar.get(), input);
+					truncator(calendar.get(), micros);
+					return GetTimeUnsafe(calendar.get(), micros);
+				} else {
+					return input;
+				}
+			});
 		} else {
-			BinaryExecutor::Execute<string_t, T, timestamp_t>(
-			    part_arg, date_arg, result, args.size(), [&](string_t specifier, T input) {
-				    if (Timestamp::IsFinite(input)) {
-					    auto truncator = TruncationFactory(GetDatePartSpecifier(specifier.GetString()));
-					    auto micros = SetTime(calendar.get(), input);
-					    truncator(calendar.get(), micros);
-					    return GetTimeUnsafe(calendar.get(), micros);
-				    } else {
-					    return input;
-				    }
-			    });
+			BinaryExecutor::Execute<string_t, T, T>(part_arg, date_arg, result, [&](string_t specifier, T input) {
+				if (input.IsFinite()) {
+					auto truncator = TruncationFactory(GetDatePartSpecifier(specifier.GetString()));
+					auto micros = SetTime(calendar.get(), input);
+					truncator(calendar.get(), micros);
+					return GetTimeUnsafe(calendar.get(), micros);
+				} else {
+					return input;
+				}
+			});
 		}
 	}
 
@@ -140,13 +168,11 @@ struct ICUDateTrunc : public ICUDateFunc {
 		return ScalarFunction({LogicalType::VARCHAR, type}, LogicalType::TIMESTAMP_TZ, ICUDateTruncFunction<TA>, Bind);
 	}
 
-	static void AddBinaryTimestampFunction(const string &name, ClientContext &context) {
-		ScalarFunctionSet set(name);
-		set.AddFunction(GetDateTruncFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
-
-		CreateScalarFunctionInfo func_info(set);
-		auto &catalog = Catalog::GetCatalog(context);
-		catalog.AddFunction(context, &func_info);
+	static void AddBinaryTimestampFunction(const Identifier &name, ExtensionLoader &loader) {
+		ScalarFunctionSet set {name};
+		set.AddFunction(GetDateTruncFunction<timestamp_tz_t>(LogicalType::TIMESTAMP_TZ));
+		set.SetArgProperties(1, ArgProperties().NonDecreasing());
+		loader.RegisterFunction(set);
 	}
 };
 
@@ -175,6 +201,7 @@ ICUDateFunc::part_trunc_t ICUDateFunc::TruncationFactory(DatePartSpecifier type)
 	case DatePartSpecifier::DOW:
 	case DatePartSpecifier::ISODOW:
 	case DatePartSpecifier::DOY:
+	case DatePartSpecifier::JULIAN_DAY:
 		return ICUDateTrunc::TruncDay;
 	case DatePartSpecifier::HOUR:
 		return ICUDateTrunc::TruncHour;
@@ -192,9 +219,16 @@ ICUDateFunc::part_trunc_t ICUDateFunc::TruncationFactory(DatePartSpecifier type)
 	}
 }
 
-void RegisterICUDateTruncFunctions(ClientContext &context) {
-	ICUDateTrunc::AddBinaryTimestampFunction("date_trunc", context);
-	ICUDateTrunc::AddBinaryTimestampFunction("datetrunc", context);
+timestamp_tz_t ICUDateFunc::CurrentMidnight(icu::Calendar *calendar, ExpressionState &state) {
+	const timestamp_tz_t current_timestamp(MetaTransaction::Get(state.GetContext()).start_timestamp);
+	auto current_micros = SetTime(calendar, current_timestamp);
+	ICUDateTrunc::TruncDay(calendar, current_micros);
+	return GetTime(calendar);
+}
+
+void RegisterICUDateTruncFunctions(ExtensionLoader &loader) {
+	ICUDateTrunc::AddBinaryTimestampFunction("date_trunc", loader);
+	ICUDateTrunc::AddBinaryTimestampFunction("datetrunc", loader);
 }
 
 } // namespace duckdb

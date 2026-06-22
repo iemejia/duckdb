@@ -16,24 +16,39 @@ namespace duckdb {
 //! PhysicalJoin represents the base class of the join operators
 class PhysicalJoin : public CachingPhysicalOperator {
 public:
-	PhysicalJoin(LogicalOperator &op, PhysicalOperatorType type, JoinType join_type, idx_t estimated_cardinality);
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::INVALID;
+
+public:
+	PhysicalJoin(PhysicalPlan &physical_plan, LogicalOperator &op, PhysicalOperatorType type, JoinType join_type,
+	             idx_t estimated_cardinality);
 
 	JoinType join_type;
 
 public:
 	bool EmptyResultIfRHSIsEmpty() const;
 
+	static bool HasNullValues(DataChunk &chunk);
 	static void ConstructSemiJoinResult(DataChunk &left, DataChunk &result, bool found_match[]);
 	static void ConstructAntiJoinResult(DataChunk &left, DataChunk &result, bool found_match[]);
 	static void ConstructMarkJoinResult(DataChunk &join_keys, DataChunk &left, DataChunk &result, bool found_match[],
 	                                    bool has_null);
 
-public:
-	static void BuildJoinPipelines(Pipeline &current, MetaPipeline &confluent_pipelines, PhysicalOperator &op);
-	void BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) override;
-	vector<const PhysicalOperator *> GetSources() const override;
+	static vector<idx_t> FillProjectionMap(const PhysicalOperator &child,
+	                                       const vector<ProjectionIndex> &projection_map);
 
-	bool IsOrderPreserving() const override {
+public:
+	static void BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipeline, PhysicalOperator &op,
+	                               bool build_rhs = true);
+	void BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) override;
+	vector<const_reference<PhysicalOperator>> GetSources() const override;
+
+	OrderPreservationType SourceOrder() const override {
+		return OrderPreservationType::NO_ORDER;
+	}
+	OrderPreservationType OperatorOrder() const override {
+		return OrderPreservationType::NO_ORDER;
+	}
+	bool SinkOrderDependent() const override {
 		return false;
 	}
 };

@@ -3,12 +3,12 @@
 # group: [storage]
 
 # load the DB from disk
-load __TEST_DIR__/test_store_null_string.db
+load {TEST_DIR}/test_store_null_string.db
 
 foreach compression <compression>
 
 statement ok
-PRAGMA force_compression='${compression}'
+PRAGMA force_compression='{compression}'
 
 # create a database and insert values
 statement ok
@@ -23,21 +23,22 @@ CHECKPOINT
 query II
 SELECT a, b FROM test ORDER BY a
 ----
-NULL	hello
 12	NULL
 13	abcdefgh
+NULL	hello
 
 restart
 
 query II
 SELECT a, b FROM test ORDER BY a
 ----
-NULL	hello
 12	NULL
 13	abcdefgh
+NULL	hello
 
 statement error
 CREATE TABLE test (a INTEGER, b STRING);
+----
 
 statement ok
 CREATE TABLE IF NOT EXISTS test (a INTEGER, b STRING);

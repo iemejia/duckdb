@@ -1,33 +1,48 @@
 #include "duckdb/main/relation/update_relation.hpp"
 #include "duckdb/parser/statement/update_statement.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 
 namespace duckdb {
 
-UpdateRelation::UpdateRelation(ClientContextWrapper &context, unique_ptr<ParsedExpression> condition_p,
-                               string schema_name_p, string table_name_p, vector<string> update_columns_p,
-                               vector<unique_ptr<ParsedExpression>> expressions_p)
-    : Relation(context, RelationType::UPDATE_RELATION), condition(move(condition_p)), schema_name(move(schema_name_p)),
-      table_name(move(table_name_p)), update_columns(move(update_columns_p)), expressions(move(expressions_p)) {
+UpdateRelation::UpdateRelation(shared_ptr<ClientContextWrapper> &context, unique_ptr<ParsedExpression> condition_p,
+                               Identifier catalog_name_p, Identifier schema_name_p, Identifier table_name_p,
+                               vector<Identifier> update_columns_p, vector<unique_ptr<ParsedExpression>> expressions_p)
+    : Relation(context, RelationType::UPDATE_RELATION), condition(std::move(condition_p)),
+      catalog_name(std::move(catalog_name_p)), schema_name(std::move(schema_name_p)),
+      table_name(std::move(table_name_p)), update_columns(std::move(update_columns_p)),
+      expressions(std::move(expressions_p)) {
 	D_ASSERT(update_columns.size() == expressions.size());
-	context.GetContext()->TryBindRelation(*this, this->columns);
+	TryBindRelation(columns);
 }
 
 BoundStatement UpdateRelation::Bind(Binder &binder) {
-	auto basetable = make_unique<BaseTableRef>();
+	auto basetable = make_uniq<BaseTableRef>();
+	basetable->catalog_name = catalog_name;
 	basetable->schema_name = schema_name;
 	basetable->table_name = table_name;
 
 	UpdateStatement stmt;
-	stmt.condition = condition ? condition->Copy() : nullptr;
-	stmt.table = move(basetable);
-	stmt.columns = update_columns;
+	auto &node = *stmt.node;
+
+	node.set_info = make_uniq<UpdateSetInfo>();
+	node.set_info->condition = condition ? condition->Copy() : nullptr;
+	node.table = std::move(basetable);
+	node.set_info->columns = update_columns;
 	for (auto &expr : expressions) {
-		stmt.expressions.push_back(expr->Copy());
+		node.set_info->expressions.push_back(expr->Copy());
 	}
-	return binder.Bind((SQLStatement &)stmt);
+	return binder.Bind(stmt.Cast<SQLStatement>());
+}
+
+unique_ptr<QueryNode> UpdateRelation::GetQueryNode() {
+	throw InternalException("Cannot create a query node from an update relation");
+}
+
+string UpdateRelation::GetQuery() {
+	return string();
 }
 
 const vector<ColumnDefinition> &UpdateRelation::Columns() {
@@ -35,7 +50,8 @@ const vector<ColumnDefinition> &UpdateRelation::Columns() {
 }
 
 string UpdateRelation::ToString(idx_t depth) {
-	string str = RenderWhitespace(depth) + "UPDATE " + table_name + " SET\n";
+	string str = RenderWhitespace(depth) + "UPDATE " +
+	             ParseInfo::QualifierToString(catalog_name, schema_name, table_name) + " SET\n";
 	for (idx_t i = 0; i < expressions.size(); i++) {
 		str += update_columns[i] + " = " + expressions[i]->ToString() + "\n";
 	}

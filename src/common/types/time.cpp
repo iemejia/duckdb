@@ -1,24 +1,25 @@
-#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/time.hpp"
-#include "duckdb/common/types/timestamp.hpp"
-#include "duckdb/common/types/interval.hpp"
-#include "duckdb/common/types/cast_helpers.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/exception.hpp"
 
-#include <cstring>
-#include <sstream>
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/cast_helpers.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/interval.hpp"
+#include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/operator/multiply.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
+
 #include <cctype>
+#include <cstring>
 
 namespace duckdb {
-
 static_assert(sizeof(dtime_t) == sizeof(int64_t), "dtime_t was padded");
 
 // string format is hh:mm:ss.microsecondsZ
 // microseconds and Z are optional
 // ISO 8601
 
-bool Time::TryConvertInternal(const char *buf, idx_t len, idx_t &pos, dtime_t &result, bool strict) {
+bool Time::TryConvertInternal(const char *buf, idx_t len, idx_t &pos, dtime_t &result, bool strict,
+                              optional_ptr<int32_t> nanos) {
 	int32_t hour = -1, min = -1, sec = -1, micros = -1;
 	pos = 0;
 
@@ -41,11 +42,14 @@ bool Time::TryConvertInternal(const char *buf, idx_t len, idx_t &pos, dtime_t &r
 		return false;
 	}
 
-	if (!Date::ParseDoubleDigit(buf, len, pos, hour)) {
-		return false;
-	}
-	if (hour < 0 || hour >= 24) {
-		return false;
+	// Allow up to 9 digit hours to support intervals
+	hour = 0;
+	for (int32_t digits = 9; pos < len && StringUtil::CharacterIsDigit(buf[pos]); ++pos) {
+		if (digits-- > 0) {
+			hour = hour * 10 + (buf[pos] - '0');
+		} else {
+			return false;
+		}
 	}
 
 	if (pos >= len) {
@@ -58,27 +62,43 @@ bool Time::TryConvertInternal(const char *buf, idx_t len, idx_t &pos, dtime_t &r
 		// invalid separator
 		return false;
 	}
-
-	if (!Date::ParseDoubleDigit(buf, len, pos, min)) {
-		return false;
-	}
-	if (min < 0 || min >= 60) {
-		return false;
-	}
-
-	if (pos >= len) {
-		return false;
-	}
-
-	if (buf[pos++] != sep) {
-		return false;
+	idx_t sep_pos = pos;
+	if (pos == len && !strict) {
+		min = 0;
+	} else {
+		if (!Date::ParseDoubleDigit(buf, len, pos, min)) {
+			return false;
+		}
+		if (min < 0 || min >= 60) {
+			return false;
+		}
 	}
 
-	if (!Date::ParseDoubleDigit(buf, len, pos, sec)) {
+	if (pos > len) {
 		return false;
 	}
-	if (sec < 0 || sec >= 60) {
-		return false;
+	if (pos == len) {
+		// no seconds field: in strict mode this is only valid for a two-digit minute (HH:MM),
+		// otherwise there is no separator to read and we must not look past the end of the buffer
+		if (strict && sep_pos + 2 != pos) {
+			return false;
+		}
+		sec = 0;
+	} else {
+		if (buf[pos++] != sep) {
+			return false;
+		}
+
+		if (pos == len && !strict) {
+			sec = 0;
+		} else {
+			if (!Date::ParseDoubleDigit(buf, len, pos, sec)) {
+				return false;
+			}
+			if (sec < 0 || sec >= 60) {
+				return false;
+			}
+		}
 	}
 
 	micros = 0;
@@ -86,10 +106,18 @@ bool Time::TryConvertInternal(const char *buf, idx_t len, idx_t &pos, dtime_t &r
 		pos++;
 		// we expect some microseconds
 		int32_t mult = 100000;
+		if (nanos) {
+			// do we expect nanoseconds?
+			mult *= Interval::NANOS_PER_MICRO;
+		}
 		for (; pos < len && StringUtil::CharacterIsDigit(buf[pos]); pos++, mult /= 10) {
 			if (mult > 0) {
 				micros += (buf[pos] - '0') * mult;
 			}
+		}
+		if (nanos) {
+			*nanos = UnsafeNumericCast<int32_t>(micros % Interval::NANOS_PER_MICRO);
+			micros /= Interval::NANOS_PER_MICRO;
 		}
 	}
 
@@ -109,19 +137,96 @@ bool Time::TryConvertInternal(const char *buf, idx_t len, idx_t &pos, dtime_t &r
 	return true;
 }
 
-bool Time::TryConvertTime(const char *buf, idx_t len, idx_t &pos, dtime_t &result, bool strict) {
-	if (!Time::TryConvertInternal(buf, len, pos, result, strict)) {
+bool Time::TryConvertInterval(const char *buf, idx_t len, idx_t &pos, dtime_t &result, bool strict,
+                              optional_ptr<int32_t> nanos) {
+	return Time::TryConvertInternal(buf, len, pos, result, strict, nanos);
+}
+
+bool Time::TryConvertTime(const char *buf, idx_t len, idx_t &pos, dtime_t &result, bool strict,
+                          optional_ptr<int32_t> nanos) {
+	if (!Time::TryConvertInternal(buf, len, pos, result, strict, nanos)) {
 		if (!strict) {
 			// last chance, check if we can parse as timestamp
 			timestamp_t timestamp;
-			if (Timestamp::TryConvertTimestamp(buf, len, timestamp)) {
+			if (Timestamp::TryConvertTimestamp(buf, len, timestamp, false, nanos) == TimestampCastResult::SUCCESS) {
+				if (!timestamp.IsFinite()) {
+					return false;
+				}
 				result = Timestamp::GetTime(timestamp);
 				return true;
 			}
 		}
 		return false;
 	}
+	return result.micros <= Interval::MICROS_PER_DAY;
+}
+
+bool Time::TryConvertTimeTZ(const char *buf, idx_t len, idx_t &pos, dtime_tz_t &result, bool &has_offset, bool strict,
+                            optional_ptr<int32_t> nanos) {
+	dtime_t time_part;
+	has_offset = false;
+	if (!Time::TryConvertInternal(buf, len, pos, time_part, false, nanos)) {
+		if (!strict) {
+			// last chance, check if we can parse as timestamp
+			timestamp_t timestamp;
+			if (Timestamp::TryConvertTimestamp(buf, len, timestamp, true, nanos) == TimestampCastResult::SUCCESS) {
+				if (!timestamp.IsFinite()) {
+					return false;
+				}
+				result = dtime_tz_t(Timestamp::GetTime(timestamp), 0);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	//	Interval parsing accepts larger hour counts, but we must limit ourselves to <= 24:00:00
+	if (time_part.micros > Interval::MICROS_PER_DAY) {
+		return false;
+	}
+
+	// skip optional whitespace before offset
+	while (pos < len && StringUtil::CharacterIsSpace(buf[pos])) {
+		pos++;
+	}
+
+	//	Get the ±HH[:MM[:SS]] part
+	//	(PG claims they don't support :SS but they do...)
+	int hh = 0;
+	int mm = 0;
+	int ss = 0;
+	has_offset = (pos < len);
+	if (has_offset && !Timestamp::TryParseUTCOffset(buf, pos, len, hh, mm, ss)) {
+		return false;
+	}
+
+	//	Offsets are in seconds in the open interval (-16:00:00, +16:00:00)
+	int32_t offset = ((hh * Interval::MINS_PER_HOUR) + mm) * Interval::SECS_PER_MINUTE + ss;
+
+	if (offset < dtime_tz_t::MIN_OFFSET || offset > dtime_tz_t::MAX_OFFSET) {
+		return false;
+	}
+
+	// in strict mode, check remaining string for non-space characters
+	if (strict) {
+		// skip trailing spaces
+		while (pos < len && StringUtil::CharacterIsSpace(buf[pos])) {
+			pos++;
+		}
+		// check position. if end was not reached, non-space chars remaining
+		if (pos < len) {
+			return false;
+		}
+	}
+
+	result = dtime_tz_t(time_part, offset);
+
 	return true;
+}
+
+dtime_t Time::NormalizeTimeTZ(dtime_tz_t timetz) {
+	date_t date(0);
+	return Interval::Add(timetz.time(), {0, 0, -timetz.offset() * Interval::MICROS_PER_SEC}, date);
 }
 
 string Time::ConversionError(const string &str) {
@@ -134,17 +239,17 @@ string Time::ConversionError(string_t str) {
 	return Time::ConversionError(str.GetString());
 }
 
-dtime_t Time::FromCString(const char *buf, idx_t len, bool strict) {
+dtime_t Time::FromCString(const char *buf, idx_t len, bool strict, optional_ptr<int32_t> nanos) {
 	dtime_t result;
 	idx_t pos;
-	if (!Time::TryConvertTime(buf, len, pos, result, strict)) {
+	if (!Time::TryConvertTime(buf, len, pos, result, strict, nanos)) {
 		throw ConversionException(ConversionError(string(buf, len)));
 	}
 	return result;
 }
 
-dtime_t Time::FromString(const string &str, bool strict) {
-	return Time::FromCString(str.c_str(), str.size(), strict);
+dtime_t Time::FromString(const string &str, bool strict, optional_ptr<int32_t> nanos) {
+	return Time::FromCString(str.c_str(), str.size(), strict, nanos);
 }
 
 string Time::ToString(dtime_t time) {
@@ -153,7 +258,7 @@ string Time::ToString(dtime_t time) {
 
 	char micro_buffer[6];
 	auto length = TimeToStringCast::Length(time_units, micro_buffer);
-	auto buffer = unique_ptr<char[]>(new char[length]);
+	auto buffer = make_unsafe_uniq_array_uninitialized<char>(length);
 	TimeToStringCast::Format(buffer.get(), length, time_units, micro_buffer);
 	return string(buffer.get(), length);
 }
@@ -189,11 +294,18 @@ dtime_t Time::FromTime(int32_t hour, int32_t minute, int32_t second, int32_t mic
 	return dtime_t(result);
 }
 
-// LCOV_EXCL_START
-#ifdef DEBUG
-static bool AssertValidTime(int32_t hour, int32_t minute, int32_t second, int32_t microseconds) {
+int64_t Time::ToNanoTime(int32_t hour, int32_t minute, int32_t second, int32_t nanoseconds) {
+	int64_t result;
+	result = hour;                                           // hours
+	result = result * Interval::MINS_PER_HOUR + minute;      // hours -> minutes
+	result = result * Interval::SECS_PER_MINUTE + second;    // minutes -> seconds
+	result = result * Interval::NANOS_PER_SEC + nanoseconds; // seconds -> nanoseconds
+	return result;
+}
+
+bool Time::IsValidTime(int32_t hour, int32_t minute, int32_t second, int32_t microseconds) {
 	if (hour < 0 || hour >= 24) {
-		return false;
+		return (hour == 24) && (minute == 0) && (second == 0) && (microseconds == 0);
 	}
 	if (minute < 0 || minute >= 60) {
 		return false;
@@ -206,8 +318,6 @@ static bool AssertValidTime(int32_t hour, int32_t minute, int32_t second, int32_
 	}
 	return true;
 }
-#endif
-// LCOV_EXCL_STOP
 
 void Time::Convert(dtime_t dtime, int32_t &hour, int32_t &min, int32_t &sec, int32_t &micros) {
 	int64_t time = dtime.micros;
@@ -218,9 +328,19 @@ void Time::Convert(dtime_t dtime, int32_t &hour, int32_t &min, int32_t &sec, int
 	sec = int32_t(time / Interval::MICROS_PER_SEC);
 	time -= int64_t(sec) * Interval::MICROS_PER_SEC;
 	micros = int32_t(time);
-#ifdef DEBUG
-	D_ASSERT(AssertValidTime(hour, min, sec, micros));
-#endif
+	D_ASSERT(Time::IsValidTime(hour, min, sec, micros));
+}
+
+dtime_t Time::FromTimeMs(int64_t time_ms) {
+	int64_t result;
+	if (!TryMultiplyOperator::Operation(time_ms, Interval::MICROS_PER_MSEC, result)) {
+		throw ConversionException("Could not convert Time(MS) to Time(US)");
+	}
+	return dtime_t(result);
+}
+
+dtime_t Time::FromTimeNs(int64_t time_ns) {
+	return dtime_t(time_ns / Interval::NANOS_PER_MICRO);
 }
 
 } // namespace duckdb

@@ -11,57 +11,54 @@
 #include "duckdb/parser/parsed_data/create_info.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 
+#include "duckdb/common/identifier.hpp"
 namespace duckdb {
+class SchemaCatalogEntry;
+
+enum class CreateViewBindingMode { BIND_ON_CREATE, SKIP_BINDING };
 
 struct CreateViewInfo : public CreateInfo {
-	CreateViewInfo() : CreateInfo(CatalogType::VIEW_ENTRY, INVALID_SCHEMA) {
-	}
-	CreateViewInfo(string schema, string view_name)
-	    : CreateInfo(CatalogType::VIEW_ENTRY, schema), view_name(view_name) {
-	}
-
-	//! Table name to insert to
-	string view_name;
-	//! Aliases of the view
-	vector<string> aliases;
-	//! Return types
-	vector<LogicalType> types;
-	//! The SelectStatement of the view
-	unique_ptr<SelectStatement> query;
+public:
+	CreateViewInfo();
+	CreateViewInfo(SchemaCatalogEntry &schema, Identifier view_name);
+	CreateViewInfo(Identifier catalog_p, Identifier schema_p, Identifier view_name);
 
 public:
-	unique_ptr<CreateInfo> Copy() const override {
-		auto result = make_unique<CreateViewInfo>(schema, view_name);
-		CopyProperties(*result);
-		result->aliases = aliases;
-		result->types = types;
-		result->query = unique_ptr_cast<SQLStatement, SelectStatement>(query->Copy());
-		return move(result);
-	}
+	//! View name
+	Identifier view_name;
+	//! Aliases of the view
+	vector<Identifier> aliases;
+	//! Return types
+	vector<LogicalType> types;
+	//! Names of the query
+	vector<Identifier> names;
+	//! Comments on columns of the query. Note: vector can be empty when no comments are set
+	identifier_map_t<Value> column_comments_map;
+	//! The SelectStatement of the view
+	unique_ptr<SelectStatement> query;
+	//! Whether or not to bind the view on create
+	CreateViewBindingMode binding_mode = CreateViewBindingMode::BIND_ON_CREATE;
 
-	static unique_ptr<CreateViewInfo> Deserialize(Deserializer &deserializer) {
-		auto result = make_unique<CreateViewInfo>();
-		result->DeserializeBase(deserializer);
+public:
+	unique_ptr<CreateInfo> Copy() const override;
 
-		FieldReader reader(deserializer);
-		result->view_name = reader.ReadRequired<string>();
-		result->aliases = reader.ReadRequiredList<string>();
-		result->types = reader.ReadRequiredSerializableList<LogicalType, LogicalType>();
-		result->query = reader.ReadOptional<SelectStatement>(nullptr);
-		reader.Finalize();
+	//! Gets a bound CreateViewInfo object from a SELECT statement and a view name, schema name, etc
+	DUCKDB_API static unique_ptr<CreateViewInfo> FromSelect(ClientContext &context, unique_ptr<CreateViewInfo> info);
+	//! Gets a bound CreateViewInfo object from a CREATE VIEW statement
+	DUCKDB_API static unique_ptr<CreateViewInfo> FromCreateView(ClientContext &context, SchemaCatalogEntry &schema,
+	                                                            const string &sql);
+	//! Parse a SELECT statement from a SQL string
+	DUCKDB_API static unique_ptr<SelectStatement> ParseSelect(const string &sql);
 
-		return result;
-	}
+	DUCKDB_API void Serialize(Serializer &serializer) const override;
+	DUCKDB_API static unique_ptr<CreateInfo> Deserialize(Deserializer &deserializer);
 
-protected:
-	void SerializeInternal(Serializer &serializer) const override {
-		FieldWriter writer(serializer);
-		writer.WriteString(view_name);
-		writer.WriteList<string>(aliases);
-		writer.WriteRegularSerializableList(types);
-		writer.WriteOptional(query);
-		writer.Finalize();
-	}
+	string ToString() const override;
+
+private:
+	CreateViewInfo(vector<Identifier> names, vector<Value> comments, identifier_map_t<Value> column_comments);
+
+	vector<Value> GetColumnCommentsList() const;
 };
 
 } // namespace duckdb

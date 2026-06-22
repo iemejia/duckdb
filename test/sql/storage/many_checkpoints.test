@@ -3,7 +3,7 @@
 # group: [storage]
 
 # load the DB from disk
-load __TEST_DIR__/many_checkpoints.db
+load {TEST_DIR}/many_checkpoints.db
 
 statement ok
 CREATE TABLE test (a INTEGER PRIMARY KEY, b INTEGER, c VARCHAR);
@@ -46,6 +46,7 @@ SELECT COUNT(*) FROM test
 
 statement error
 INSERT INTO test VALUES (11, 22, 'hello');
+----
 
 statement ok
 CHECKPOINT

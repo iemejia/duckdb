@@ -17,22 +17,26 @@ namespace duckdb {
 
 class LogicalExport : public LogicalOperator {
 public:
-	LogicalExport(CopyFunction function, unique_ptr<CopyInfo> copy_info, BoundExportData exported_tables)
-	    : LogicalOperator(LogicalOperatorType::LOGICAL_EXPORT), function(function), copy_info(move(copy_info)),
-	      exported_tables(move(exported_tables)) {
-	}
-	CopyFunction function;
-	unique_ptr<CopyInfo> copy_info;
-	BoundExportData exported_tables;
+	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_EXPORT;
 
 public:
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	LogicalExport(CopyFunction function, unique_ptr<CopyInfo> copy_info, unique_ptr<BoundExportData> exported_tables);
+
+	unique_ptr<CopyInfo> copy_info;
+	CopyFunction function;
+	unique_ptr<BoundExportData> exported_tables;
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
 
 protected:
+	LogicalExport(ClientContext &context, unique_ptr<ParseInfo> copy_info, unique_ptr<ParseInfo> exported_tables);
+
 	void ResolveTypes() override {
 		types.emplace_back(LogicalType::BOOLEAN);
 	}
+
+	CopyFunction GetCopyFunction(ClientContext &context, CopyInfo &info);
 };
 
 } // namespace duckdb

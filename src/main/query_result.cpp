@@ -1,19 +1,22 @@
 #include "duckdb/main/query_result.hpp"
+
+#include "duckdb/common/box_renderer.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/main/client_context.hpp"
-
 namespace duckdb {
 
-BaseQueryResult::BaseQueryResult(QueryResultType type, StatementType statement_type, StatementProperties properties,
+BaseQueryResult::BaseQueryResult(QueryResultType type, StatementType statement_type, StatementProperties properties_p,
                                  vector<LogicalType> types_p, vector<string> names_p)
-    : type(type), statement_type(statement_type), properties(properties), types(move(types_p)), names(move(names_p)),
-      success(true) {
+    : type(type), statement_type(statement_type), properties(std::move(properties_p)), types(std::move(types_p)),
+      names(std::move(names_p)), success(true) {
 	D_ASSERT(types.size() == names.size());
 }
 
-BaseQueryResult::BaseQueryResult(QueryResultType type, PreservedError error)
-    : type(type), success(false), error(move(error)) {
+BaseQueryResult::BaseQueryResult(QueryResultType type, ErrorData error)
+    : type(type), success(false), error(std::move(error)) {
+	// Assert that the error object is initialized
+	D_ASSERT(this->error.HasError());
 }
 
 BaseQueryResult::~BaseQueryResult() {
@@ -24,13 +27,13 @@ void BaseQueryResult::ThrowError(const string &prepended_message) const {
 	error.Throw(prepended_message);
 }
 
-void BaseQueryResult::SetError(PreservedError error) {
-	success = !error;
-	this->error = move(error);
+void BaseQueryResult::SetError(ErrorData error) {
+	success = !error.HasError();
+	this->error = std::move(error);
 }
 
 bool BaseQueryResult::HasError() const {
-	D_ASSERT((bool)error == !success);
+	D_ASSERT(error.HasError() == !success);
 	return !success;
 }
 
@@ -38,12 +41,12 @@ const ExceptionType &BaseQueryResult::GetErrorType() const {
 	return error.Type();
 }
 
-const std::string &BaseQueryResult::GetError() {
+const std::string &BaseQueryResult::GetError() const {
 	D_ASSERT(HasError());
 	return error.Message();
 }
 
-PreservedError &BaseQueryResult::GetErrorObject() {
+ErrorData &BaseQueryResult::GetErrorObject() {
 	return error;
 }
 
@@ -53,14 +56,51 @@ idx_t BaseQueryResult::ColumnCount() {
 
 QueryResult::QueryResult(QueryResultType type, StatementType statement_type, StatementProperties properties,
                          vector<LogicalType> types_p, vector<string> names_p, ClientProperties client_properties_p)
-    : BaseQueryResult(type, statement_type, properties, move(types_p), move(names_p)),
-      client_properties(move(client_properties_p)) {
+    : BaseQueryResult(type, statement_type, std::move(properties), std::move(types_p), std::move(names_p)),
+      client_properties(std::move(client_properties_p)) {
 }
 
-QueryResult::QueryResult(QueryResultType type, PreservedError error) : BaseQueryResult(type, move(error)) {
+QueryResult::QueryResult(QueryResultType type, ErrorData error)
+    : BaseQueryResult(type, std::move(error)),
+      client_properties("UTC", ArrowOffsetSize::REGULAR, false, false, false, ArrowFormatVersion::V1_0, nullptr) {
 }
 
 QueryResult::~QueryResult() {
+}
+
+void QueryResult::DeduplicateColumns(vector<string> &names) {
+	auto identifiers = StringsToIdentifiers(names);
+	DeduplicateColumns(identifiers);
+	names = IdentifiersToStrings(identifiers);
+}
+
+void QueryResult::DeduplicateColumns(vector<Identifier> &names) {
+	identifier_map_t<idx_t> name_map;
+	for (auto &column_name : names) {
+		if (name_map.find(column_name) == name_map.end()) {
+			// Name does not exist yet
+			name_map[column_name]++;
+		} else {
+			// Name already exists, we add _x where x is the repetition number
+			Identifier new_column_name(column_name + "_" + std::to_string(name_map[column_name]));
+			while (name_map.find(new_column_name) != name_map.end()) {
+				// This name is already here due to a previous definition
+				name_map[column_name]++;
+				new_column_name = Identifier(column_name + "_" + std::to_string(name_map[column_name]));
+			}
+			column_name = new_column_name;
+			name_map[new_column_name]++;
+		}
+	}
+}
+
+const string &QueryResult::ColumnName(idx_t index) const {
+	D_ASSERT(index < names.size());
+	return names[index];
+}
+
+string QueryResult::ToBox(BoxRendererContext &context, const BoxRendererConfig &config) {
+	return ToString();
 }
 
 unique_ptr<DataChunk> QueryResult::Fetch() {
@@ -70,6 +110,10 @@ unique_ptr<DataChunk> QueryResult::Fetch() {
 	}
 	chunk->Flatten();
 	return chunk;
+}
+
+unique_ptr<DataChunk> QueryResult::FetchRaw() {
+	return FetchInternal();
 }
 
 bool QueryResult::Equals(QueryResult &other) { // LCOV_EXCL_START
@@ -90,9 +134,17 @@ bool QueryResult::Equals(QueryResult &other) { // LCOV_EXCL_START
 	}
 	// now compare the actual values
 	// fetch chunks
+	unique_ptr<DataChunk> lchunk, rchunk;
+	idx_t lindex = 0, rindex = 0;
 	while (true) {
-		auto lchunk = Fetch();
-		auto rchunk = other.Fetch();
+		if (!lchunk || lindex == lchunk->size()) {
+			lchunk = Fetch();
+			lindex = 0;
+		}
+		if (!rchunk || rindex == rchunk->size()) {
+			rchunk = other.Fetch();
+			rindex = 0;
+		}
 		if (!lchunk && !rchunk) {
 			return true;
 		}
@@ -102,14 +154,11 @@ bool QueryResult::Equals(QueryResult &other) { // LCOV_EXCL_START
 		if (lchunk->size() == 0 && rchunk->size() == 0) {
 			return true;
 		}
-		if (lchunk->size() != rchunk->size()) {
-			return false;
-		}
 		D_ASSERT(lchunk->ColumnCount() == rchunk->ColumnCount());
-		for (idx_t col = 0; col < rchunk->ColumnCount(); col++) {
-			for (idx_t row = 0; row < rchunk->size(); row++) {
-				auto lvalue = lchunk->GetValue(col, row);
-				auto rvalue = rchunk->GetValue(col, row);
+		for (; lindex < lchunk->size() && rindex < rchunk->size(); lindex++, rindex++) {
+			for (idx_t col = 0; col < rchunk->ColumnCount(); col++) {
+				auto lvalue = lchunk->GetValue(col, lindex);
+				auto rvalue = rchunk->GetValue(col, rindex);
 				if (lvalue.IsNull() && rvalue.IsNull()) {
 					continue;
 				}
@@ -139,10 +188,6 @@ string QueryResult::HeaderToString() {
 	}
 	result += "\n";
 	return result;
-}
-
-string QueryResult::GetConfigTimezone(QueryResult &query_result) {
-	return query_result.client_properties.timezone;
 }
 
 } // namespace duckdb

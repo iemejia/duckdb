@@ -3,9 +3,6 @@
 # group: [sqlsmith]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE ts("timestamp" TIMESTAMP);;
 
 statement ok
@@ -24,3 +21,5 @@ select
     cast(ref_0.timestamp as timestamp)) as c10
 from
   ts as ref_0
+----
+Conversion Error: Timestamp difference is out of bounds

@@ -7,15 +7,20 @@ namespace duckdb {
 
 BoundStatement Binder::Bind(PrepareStatement &stmt) {
 	Planner prepared_planner(context);
-	auto prepared_data = prepared_planner.PrepareSQLStatement(move(stmt.statement));
+	auto prepared_data = prepared_planner.PrepareSQLStatement(std::move(stmt.statement));
+	global_binder_state->bound_tables = prepared_planner.binder->global_binder_state->bound_tables;
 
-	auto prepare = make_unique<LogicalPrepare>(stmt.name, move(prepared_data), move(prepared_planner.plan));
-	// we can prepare in read-only mode: prepared statements are not written to the catalog
-	properties.read_only = true;
+	if (prepared_planner.properties.always_require_rebind) {
+		// we always need to rebind - don't keep the plan around
+		prepared_planner.plan.reset();
+	}
+
+	auto prepare = make_uniq<LogicalPrepare>(stmt.name, std::move(prepared_data), std::move(prepared_planner.plan));
 	// we can always prepare, even if the transaction has been invalidated
 	// this is required because most clients ALWAYS invoke prepared statements
+	auto &properties = GetStatementProperties();
 	properties.requires_valid_transaction = false;
-	properties.allow_stream_result = false;
+	properties.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
 	properties.bound_all_parameters = true;
 	properties.parameter_count = 0;
 	properties.return_type = StatementReturnType::NOTHING;
@@ -23,7 +28,7 @@ BoundStatement Binder::Bind(PrepareStatement &stmt) {
 	BoundStatement result;
 	result.names = {"Success"};
 	result.types = {LogicalType::BOOLEAN};
-	result.plan = move(prepare);
+	result.plan = std::move(prepare);
 	return result;
 }
 

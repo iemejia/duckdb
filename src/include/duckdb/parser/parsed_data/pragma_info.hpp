@@ -8,9 +8,9 @@
 
 #pragma once
 
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/parser/parsed_data/parse_info.hpp"
 #include "duckdb/common/types/value.hpp"
-#include "duckdb/common/named_parameter_map.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 
 namespace duckdb {
@@ -18,21 +18,26 @@ namespace duckdb {
 enum class PragmaType : uint8_t { PRAGMA_STATEMENT, PRAGMA_CALL };
 
 struct PragmaInfo : public ParseInfo {
-	//! Name of the PRAGMA statement
-	string name;
-	//! Parameter list (if any)
-	vector<Value> parameters;
-	//! Named parameter list (if any)
-	named_parameter_map_t named_parameters;
+public:
+	static constexpr const ParseInfoType TYPE = ParseInfoType::PRAGMA_INFO;
 
 public:
-	unique_ptr<PragmaInfo> Copy() const {
-		auto result = make_unique<PragmaInfo>();
-		result->name = name;
-		result->parameters = parameters;
-		result->named_parameters = named_parameters;
-		return result;
+	PragmaInfo() : ParseInfo(TYPE) {
 	}
+
+	//! Name of the PRAGMA statement
+	Identifier name;
+	//! Parameter list (if any)
+	vector<unique_ptr<ParsedExpression>> parameters;
+	//! Named parameter list (if any)
+	case_insensitive_map_t<unique_ptr<ParsedExpression>> named_parameters;
+
+public:
+	unique_ptr<PragmaInfo> Copy() const;
+	string ToString() const;
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<ParseInfo> Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

@@ -1,21 +1,27 @@
 #include "duckdb/planner/operator/logical_cteref.hpp"
-#include "duckdb/common/field_writer.hpp"
+
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
-void LogicalCTERef::Serialize(FieldWriter &writer) const {
-	writer.WriteField(table_index);
-	writer.WriteField(cte_index);
-	writer.WriteRegularSerializableList(chunk_types);
-	writer.WriteList<string>(bound_columns);
+InsertionOrderPreservingMap<string> LogicalCTERef::ParamsToString() const {
+	InsertionOrderPreservingMap<string> result;
+	result["CTE Index"] = StringUtil::Format("%llu", cte_index.index);
+	SetParamsEstimatedCardinality(result);
+	return result;
 }
 
-unique_ptr<LogicalOperator> LogicalCTERef::Deserialize(LogicalDeserializationState &state, FieldReader &reader) {
-	auto table_index = reader.ReadRequired<idx_t>();
-	auto cte_index = reader.ReadRequired<idx_t>();
-	auto chunk_types = reader.ReadRequiredSerializableList<LogicalType, LogicalType>();
-	auto bound_columns = reader.ReadRequiredList<string>();
-	return make_unique<LogicalCTERef>(table_index, cte_index, chunk_types, bound_columns);
+vector<TableIndex> LogicalCTERef::GetTableIndex() const {
+	return vector<TableIndex> {table_index};
+}
+
+string LogicalCTERef::GetName() const {
+#ifdef DEBUG
+	if (DBConfigOptions::debug_print_bindings) {
+		return LogicalOperator::GetName() + StringUtil::Format(" #%llu", table_index.index);
+	}
+#endif
+	return LogicalOperator::GetName();
 }
 
 } // namespace duckdb

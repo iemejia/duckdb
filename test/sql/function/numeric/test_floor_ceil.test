@@ -3,7 +3,7 @@
 # group: [numeric]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE numbers(n DOUBLE)

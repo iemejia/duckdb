@@ -1,7 +1,6 @@
 #include "catch.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb.hpp"
-#include "duckdb/main/appender.hpp"
 #include "test_helpers.hpp"
 
 #include <signal.h>
@@ -9,7 +8,6 @@
 #include <unistd.h>
 
 using namespace duckdb;
-using namespace std;
 
 #define BOOL_COUNT 3
 
@@ -38,14 +36,14 @@ TEST_CASE("Test write lock with multiple processes", "[persistence][.]") {
 			usleep(100);
 		}
 	} else if (pid > 0) {
-		unique_ptr<DuckDB> db;
+		duckdb::unique_ptr<DuckDB> db;
 		// parent process
 		// sleep a bit to wait for child process
 		while (*count == 0) {
 			usleep(100);
 		}
 		// try to open db for writing, this should fail
-		REQUIRE_THROWS(db = make_unique<DuckDB>(dbdir));
+		REQUIRE_THROWS(db = make_uniq<DuckDB>(dbdir));
 		// kill the child
 		if (kill(pid, SIGKILL) != 0) {
 			FAIL();
@@ -86,16 +84,16 @@ TEST_CASE("Test read lock with multiple processes", "[persistence][.]") {
 			con.Query("SELECT * FROM a");
 		}
 	} else if (pid > 0) {
-		unique_ptr<DuckDB> db;
+		duckdb::unique_ptr<DuckDB> db;
 		// parent process
 		// sleep a bit to wait for child process
 		while (*count == 0) {
 			usleep(100);
 		}
 		// try to open db for writing, this should fail
-		REQUIRE_THROWS(db = make_unique<DuckDB>(dbdir));
+		REQUIRE_THROWS(db = make_uniq<DuckDB>(dbdir));
 		// but opening db for reading should work
-		REQUIRE_NOTHROW(db = make_unique<DuckDB>(dbdir, &config));
+		REQUIRE_NOTHROW(db = make_uniq<DuckDB>(dbdir, &config));
 		// we can query the database
 		Connection con(*db);
 		REQUIRE_NO_FAIL(con.Query("SELECT * FROM a"));

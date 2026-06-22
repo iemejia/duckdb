@@ -10,6 +10,8 @@ INSERT INTO test (i, j) VALUES (1, 2), (2, 3)
 
 statement error
 INSERT INTO test (i, j) VALUES (NULL, 2)
+----
+Constraint Error: NOT NULL constraint failed: test.i
 
 statement ok
 ALTER TABLE test RENAME COLUMN i TO k
@@ -20,4 +22,5 @@ INSERT INTO test (k, j) VALUES (1, 2), (2, 3)
 
 statement error
 INSERT INTO test (k, j) VALUES (NULL, 2)
-
+----
+Constraint Error: NOT NULL constraint failed: test.k

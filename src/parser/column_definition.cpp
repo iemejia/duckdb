@@ -1,81 +1,55 @@
 #include "duckdb/parser/column_definition.hpp"
-#include "duckdb/common/field_writer.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
-#include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
+#include "duckdb/common/exception/parser_exception.hpp"
+#include "duckdb/common/extra_type_info.hpp"
 
 namespace duckdb {
 
-ColumnDefinition::ColumnDefinition(string name_p, LogicalType type_p) : name(move(name_p)), type(move(type_p)) {
+ColumnDefinition::ColumnDefinition(Identifier name_p, LogicalType type_p)
+    : name(std::move(name_p)), type(std::move(type_p)) {
 }
 
-ColumnDefinition::ColumnDefinition(string name_p, LogicalType type_p, unique_ptr<ParsedExpression> expression,
+ColumnDefinition::ColumnDefinition(Identifier name_p, LogicalType type_p, unique_ptr<ParsedExpression> expression,
                                    TableColumnType category)
-    : name(move(name_p)), type(move(type_p)), category(category) {
-	switch (category) {
-	case TableColumnType::STANDARD: {
-		default_value = move(expression);
-		break;
-	}
-	case TableColumnType::GENERATED: {
-		generated_expression = move(expression);
-		break;
-	}
-	default: {
-		throw InternalException("Type not implemented for TableColumnType");
-	}
-	}
+    : name(std::move(name_p)), type(std::move(type_p)), category(category), expression(std::move(expression)) {
 }
 
 ColumnDefinition ColumnDefinition::Copy() const {
 	ColumnDefinition copy(name, type);
 	copy.oid = oid;
 	copy.storage_oid = storage_oid;
-	copy.SetDefaultValue(default_value ? default_value->Copy() : nullptr);
-	copy.generated_expression = generated_expression ? generated_expression->Copy() : nullptr;
+	copy.expression = expression ? expression->Copy() : nullptr;
 	copy.compression_type = compression_type;
 	copy.category = category;
+	copy.comment = comment;
+	copy.tags = tags;
 	return copy;
 }
 
-void ColumnDefinition::Serialize(Serializer &serializer) const {
-	FieldWriter writer(serializer);
-	writer.WriteString(name);
-	writer.WriteSerializable(type);
+const ParsedExpression &ColumnDefinition::DefaultValue() const {
+	if (!HasDefaultValue()) {
+		if (Generated()) {
+			throw InternalException("Calling DefaultValue() on a generated column");
+		}
+		throw InternalException("DefaultValue() called on a column without a default value");
+	}
+	return *expression;
+}
+
+bool ColumnDefinition::HasDefaultValue() const {
 	if (Generated()) {
-		writer.WriteOptional(generated_expression);
-	} else {
-		writer.WriteOptional(default_value);
+		return false;
 	}
-	writer.WriteField<TableColumnType>(category);
-	writer.Finalize();
-}
-
-ColumnDefinition ColumnDefinition::Deserialize(Deserializer &source) {
-	FieldReader reader(source);
-	auto column_name = reader.ReadRequired<string>();
-	auto column_type = reader.ReadRequiredSerializable<LogicalType, LogicalType>();
-	auto expression = reader.ReadOptional<ParsedExpression>(nullptr);
-	auto category = reader.ReadField<TableColumnType>(TableColumnType::STANDARD);
-	reader.Finalize();
-
-	switch (category) {
-	case TableColumnType::STANDARD:
-		return ColumnDefinition(column_name, column_type, move(expression), TableColumnType::STANDARD);
-	case TableColumnType::GENERATED:
-		return ColumnDefinition(column_name, column_type, move(expression), TableColumnType::GENERATED);
-	default:
-		throw NotImplementedException("Type not implemented for TableColumnType");
-	}
-}
-
-const unique_ptr<ParsedExpression> &ColumnDefinition::DefaultValue() const {
-	return default_value;
+	return expression != nullptr;
 }
 
 void ColumnDefinition::SetDefaultValue(unique_ptr<ParsedExpression> default_value) {
-	this->default_value = move(default_value);
+	if (Generated()) {
+		throw InternalException("Calling SetDefaultValue() on a generated column");
+	}
+	this->expression = std::move(default_value);
 }
 
 const LogicalType &ColumnDefinition::Type() const {
@@ -90,12 +64,27 @@ void ColumnDefinition::SetType(const LogicalType &type) {
 	this->type = type;
 }
 
-const string &ColumnDefinition::Name() const {
+const Identifier &ColumnDefinition::Name() const {
 	return name;
 }
-
-void ColumnDefinition::SetName(const string &name) {
+void ColumnDefinition::SetName(const Identifier &name) {
 	this->name = name;
+}
+
+const Value &ColumnDefinition::Comment() const {
+	return comment;
+}
+
+void ColumnDefinition::SetComment(const Value &comment) {
+	this->comment = comment;
+}
+
+const InsertionOrderPreservingMap<string> &ColumnDefinition::Tags() const {
+	return tags;
+}
+
+void ColumnDefinition::SetTags(InsertionOrderPreservingMap<string> new_tags) {
+	this->tags = std::move(new_tags);
 }
 
 const duckdb::CompressionType &ColumnDefinition::CompressionType() const {
@@ -138,39 +127,80 @@ bool ColumnDefinition::Generated() const {
 	return category == TableColumnType::GENERATED;
 }
 
+string ColumnDefinition::ToSQLString() const {
+	string result = SQLIdentifier(Name()) + " ";
+	auto &column_type = Type();
+	if (column_type.id() != LogicalTypeId::ANY) {
+		result += Type().ToString();
+	}
+	auto extra_type_info = column_type.AuxInfo();
+	if (extra_type_info) {
+		if (extra_type_info->type == ExtraTypeInfoType::STRING_TYPE_INFO) {
+			auto &string_info = extra_type_info->Cast<StringTypeInfo>();
+			if (!string_info.collation.empty()) {
+				result += " COLLATE " + string_info.collation;
+			}
+		}
+		if (extra_type_info->type == ExtraTypeInfoType::UNBOUND_TYPE_INFO) {
+			// TODO
+			// auto &colllation = UnboundType::GetCollation(column_type);
+			// if (!colllation.empty()) {
+			//	ss << " COLLATE " + colllation;
+			//}
+		}
+	}
+	if (Generated()) {
+		reference<const ParsedExpression> generated_expression = GeneratedExpression();
+		if (column_type.id() != LogicalTypeId::ANY) {
+			// We artificially add a cast if the type is specified, need to strip it
+			auto &expr = generated_expression.get();
+			D_ASSERT(expr.GetExpressionType() == ExpressionType::OPERATOR_CAST);
+			auto &cast_expr = expr.Cast<CastExpression>();
+			generated_expression = cast_expr.Child();
+		}
+		result += " GENERATED ALWAYS AS(" + generated_expression.get().ToString() + ")";
+	} else if (HasDefaultValue()) {
+		result += " DEFAULT(" + DefaultValue().ToString() + ")";
+	}
+	if (CompressionType() != CompressionType::COMPRESSION_AUTO) {
+		result += " USING COMPRESSION " + CompressionTypeToString(CompressionType());
+	}
+	return result;
+}
+
 //===--------------------------------------------------------------------===//
 // Generated Columns (VIRTUAL)
 //===--------------------------------------------------------------------===//
 
-static void VerifyColumnRefs(ParsedExpression &expr) {
-	if (expr.type == ExpressionType::COLUMN_REF) {
-		auto &column_ref = (ColumnRefExpression &)expr;
+static void VerifyColumnRefs(const ParsedExpression &expr) {
+	ParsedExpressionIterator::VisitExpression<ColumnRefExpression>(expr, [&](const ColumnRefExpression &column_ref) {
 		if (column_ref.IsQualified()) {
 			throw ParserException(
 			    "Qualified (tbl.name) column references are not allowed inside of generated column expressions");
 		}
-	}
-	ParsedExpressionIterator::EnumerateChildren(
-	    expr, [&](const ParsedExpression &child) { VerifyColumnRefs((ParsedExpression &)child); });
+	});
 }
 
 static void InnerGetListOfDependencies(ParsedExpression &expr, vector<string> &dependencies) {
-	if (expr.type == ExpressionType::COLUMN_REF) {
-		auto columnref = (ColumnRefExpression &)expr;
+	if (expr.GetExpressionType() == ExpressionType::COLUMN_REF) {
+		auto columnref = expr.Cast<ColumnRefExpression>();
 		auto &name = columnref.GetColumnName();
-		dependencies.push_back(name);
+		dependencies.emplace_back(name);
 	}
 	ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+		if (expr.GetExpressionType() == ExpressionType::LAMBDA) {
+			throw NotImplementedException("Lambda functions are currently not supported in generated columns.");
+		}
 		InnerGetListOfDependencies((ParsedExpression &)child, dependencies);
 	});
 }
 
 void ColumnDefinition::GetListOfDependencies(vector<string> &dependencies) const {
 	D_ASSERT(Generated());
-	InnerGetListOfDependencies(*generated_expression, dependencies);
+	InnerGetListOfDependencies(*expression, dependencies);
 }
 
-string ColumnDefinition::GetName() const {
+Identifier ColumnDefinition::GetName() const {
 	return name;
 }
 
@@ -178,43 +208,43 @@ LogicalType ColumnDefinition::GetType() const {
 	return type;
 }
 
-void ColumnDefinition::SetGeneratedExpression(unique_ptr<ParsedExpression> expression) {
+void ColumnDefinition::SetGeneratedExpression(unique_ptr<ParsedExpression> new_expr) {
 	category = TableColumnType::GENERATED;
 
-	if (expression->HasSubquery()) {
+	if (new_expr->HasSubquery()) {
 		throw ParserException("Expression of generated column \"%s\" contains a subquery, which isn't allowed", name);
 	}
 
-	VerifyColumnRefs(*expression);
+	VerifyColumnRefs(*new_expr);
 	if (type.id() == LogicalTypeId::ANY) {
-		generated_expression = move(expression);
+		expression = std::move(new_expr);
 		return;
 	}
 	// Always wrap the expression in a cast, that way we can always update the cast when we change the type
 	// Except if the type is LogicalType::ANY (no type specified)
-	generated_expression = make_unique_base<ParsedExpression, CastExpression>(type, move(expression));
+	expression = make_uniq_base<ParsedExpression, CastExpression>(type, std::move(new_expr));
 }
 
 void ColumnDefinition::ChangeGeneratedExpressionType(const LogicalType &type) {
 	D_ASSERT(Generated());
 	// First time the type is set, add a cast around the expression
 	D_ASSERT(this->type.id() == LogicalTypeId::ANY);
-	generated_expression = make_unique_base<ParsedExpression, CastExpression>(type, move(generated_expression));
+	expression = make_uniq_base<ParsedExpression, CastExpression>(type, std::move(expression));
 	// Every generated expression should be wrapped in a cast on creation
 	// D_ASSERT(generated_expression->type == ExpressionType::OPERATOR_CAST);
-	// auto &cast_expr = (CastExpression &)*generated_expression;
-	// auto base_expr = move(cast_expr.child);
-	// generated_expression = make_unique_base<ParsedExpression, CastExpression>(type, move(base_expr));
+	// auto &cast_expr = generated_expression->Cast<CastExpression>();
+	// auto base_expr = std::move(cast_expr.child);
+	// generated_expression = make_uniq_base<ParsedExpression, CastExpression>(type, std::move(base_expr));
 }
 
 const ParsedExpression &ColumnDefinition::GeneratedExpression() const {
 	D_ASSERT(Generated());
-	return *generated_expression;
+	return *expression;
 }
 
 ParsedExpression &ColumnDefinition::GeneratedExpressionMutable() {
 	D_ASSERT(Generated());
-	return *generated_expression;
+	return *expression;
 }
 
 } // namespace duckdb

@@ -3,9 +3,6 @@
 # group: [virtual]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE test (
     foo INTEGER,
     bar INTEGER GENERATED ALWAYS AS (foo+1) VIRTUAL,
@@ -15,6 +12,8 @@ CREATE TABLE test (
 #Inserting into a generated column by name
 statement error
 INSERT INTO test (bar) VALUES (5)
+----
+<REGEX>:.*Binder Error.*Cannot insert.*
 
 #Using column names
 statement ok
@@ -33,6 +32,8 @@ SELECT * FROM test
 #Using VALUES with not enough values - cant rely on DEFAULT here
 statement error
 INSERT INTO test VALUES (22)
+----
+<REGEX>:.*Binder Error.*table test has 2 columns.*
 
 #Using VALUES correctly
 statement ok
@@ -41,6 +42,8 @@ INSERT INTO test VALUES (22, 10);
 #Using VALUES incorrectly, too many values
 statement error
 INSERT INTO test VALUES (22, 10, 10)
+----
+<REGEX>:.*Binder Error.*table test has 2 columns.*
 
 statement ok
 CREATE TABLE tbl (
@@ -73,3 +76,5 @@ CREATE TABLE tbl2 (
 
 statement error
 INSERT INTO tbl2 VALUES ('test');
+----
+<REGEX>:.*Constraint Error.*Incorrect value for generated column.*

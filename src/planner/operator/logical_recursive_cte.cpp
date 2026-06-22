@@ -1,20 +1,62 @@
 #include "duckdb/planner/operator/logical_recursive_cte.hpp"
-#include "duckdb/common/field_writer.hpp"
+
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
-void LogicalRecursiveCTE::Serialize(FieldWriter &writer) const {
-	writer.WriteField(table_index);
-	writer.WriteField(column_count);
-	writer.WriteField(union_all);
+LogicalRecursiveCTE::LogicalRecursiveCTE() : LogicalCTE(LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
 }
 
-unique_ptr<LogicalOperator> LogicalRecursiveCTE::Deserialize(LogicalDeserializationState &state, FieldReader &reader) {
-	auto table_index = reader.ReadRequired<idx_t>();
-	auto column_count = reader.ReadRequired<idx_t>();
-	auto union_all = reader.ReadRequired<bool>();
-	// TODO(stephwang): review if unique_ptr<LogicalOperator> plan is needed
-	return unique_ptr<LogicalRecursiveCTE>(new LogicalRecursiveCTE(table_index, column_count, union_all, state.type));
+LogicalRecursiveCTE::LogicalRecursiveCTE(Identifier ctename_p, TableIndex table_index, idx_t column_count,
+                                         bool union_all, vector<unique_ptr<Expression>> key_targets,
+                                         unique_ptr<LogicalOperator> top, unique_ptr<LogicalOperator> bottom)
+    : LogicalCTE(std::move(ctename_p), table_index, column_count, std::move(top), std::move(bottom),
+                 LogicalOperatorType::LOGICAL_RECURSIVE_CTE),
+      union_all(union_all), key_targets(std::move(key_targets)) {
+}
+
+InsertionOrderPreservingMap<string> LogicalRecursiveCTE::ParamsToString() const {
+	InsertionOrderPreservingMap<string> result;
+	result["CTE Name"] = ctename.GetIdentifierName();
+	result["Table Index"] = StringUtil::Format("%llu", table_index.index);
+	SetParamsEstimatedCardinality(result);
+	return result;
+}
+
+vector<TableIndex> LogicalRecursiveCTE::GetTableIndex() const {
+	return vector<TableIndex> {table_index};
+}
+
+string LogicalRecursiveCTE::GetName() const {
+#ifdef DEBUG
+	if (DBConfigOptions::debug_print_bindings) {
+		return LogicalOperator::GetName() + StringUtil::Format(" #%llu", table_index.index);
+	}
+#endif
+	return LogicalOperator::GetName();
+}
+
+void LogicalRecursiveCTE::ResolveTypes() {
+	types = children[0]->types;
+
+	if (payload_aggregates.empty()) {
+		return;
+	}
+
+	unordered_set<ProjectionIndex> key_idx;
+	for (auto &key_target : key_targets) {
+		D_ASSERT(key_target->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF);
+		auto &bound_ref = key_target->Cast<BoundColumnRefExpression>();
+		key_idx.insert(bound_ref.Binding().column_index);
+	}
+
+	idx_t pay_idx = 0;
+	for (idx_t i = 0; i < types.size(); ++i) {
+		if (key_idx.find(ProjectionIndex(i)) != key_idx.end()) {
+			continue;
+		}
+		types[i] = payload_aggregates[pay_idx++]->GetReturnType();
+	}
 }
 
 } // namespace duckdb

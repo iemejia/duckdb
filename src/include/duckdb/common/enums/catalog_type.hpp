@@ -25,6 +25,9 @@ enum class CatalogType : uint8_t {
 	SEQUENCE_ENTRY = 6,
 	COLLATION_ENTRY = 7,
 	TYPE_ENTRY = 8,
+	DATABASE_ENTRY = 9,
+	COORDINATE_SYSTEM_ENTRY = 10,
+	TRIGGER_ENTRY = 11,
 
 	// functions
 	TABLE_FUNCTION_ENTRY = 25,
@@ -34,12 +37,23 @@ enum class CatalogType : uint8_t {
 	COPY_FUNCTION_ENTRY = 29,
 	MACRO_ENTRY = 30,
 	TABLE_MACRO_ENTRY = 31,
+	WINDOW_FUNCTION_ENTRY = 32,
 
 	// version info
-	UPDATED_ENTRY = 50,
 	DELETED_ENTRY = 51,
+	RENAMED_ENTRY = 52,
+
+	// secrets
+	SECRET_ENTRY = 71,
+	SECRET_TYPE_ENTRY = 72,
+	SECRET_FUNCTION_ENTRY = 73,
+
+	// dependency info
+	DEPENDENCY_ENTRY = 100
+
 };
 
 DUCKDB_API string CatalogTypeToString(CatalogType type);
+CatalogType CatalogTypeFromString(const string &type);
 
 } // namespace duckdb

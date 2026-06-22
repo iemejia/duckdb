@@ -6,77 +6,89 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 
 namespace duckdb {
 
 unique_ptr<LogicalOperator> InClauseRewriter::Rewrite(unique_ptr<LogicalOperator> op) {
-	if (op->children.size() == 1) {
-		root = move(op->children[0]);
+	switch (op->type) {
+	case LogicalOperatorType::LOGICAL_PROJECTION:
+	case LogicalOperatorType::LOGICAL_FILTER: {
+		current_op = op.get();
+		root = std::move(op->children[0]);
 		VisitOperatorExpressions(*op);
-		op->children[0] = move(root);
+		op->children[0] = std::move(root);
+		break;
+	}
+	default:
+		break;
 	}
 
 	for (auto &child : op->children) {
-		child = Rewrite(move(child));
+		child = Rewrite(std::move(child));
 	}
 	return op;
 }
 
 unique_ptr<Expression> InClauseRewriter::VisitReplace(BoundOperatorExpression &expr, unique_ptr<Expression> *expr_ptr) {
-	if (expr.type != ExpressionType::COMPARE_IN && expr.type != ExpressionType::COMPARE_NOT_IN) {
+	if (expr.GetExpressionType() != ExpressionType::COMPARE_IN &&
+	    expr.GetExpressionType() != ExpressionType::COMPARE_NOT_IN) {
 		return nullptr;
 	}
 	D_ASSERT(root);
-	auto in_type = expr.children[0]->return_type;
-	bool is_regular_in = expr.type == ExpressionType::COMPARE_IN;
+	auto in_type = expr.GetChildrenMutable()[0]->GetReturnType();
+	bool is_regular_in = expr.GetExpressionType() == ExpressionType::COMPARE_IN;
 	bool all_scalar = true;
 	// IN clause with many children: try to generate a mark join that replaces this IN expression
 	// we can only do this if the expressions in the expression list are scalar
-	for (idx_t i = 1; i < expr.children.size(); i++) {
-		if (!expr.children[i]->IsFoldable()) {
+	for (idx_t i = 1; i < expr.GetChildrenMutable().size(); i++) {
+		if (!expr.GetChildrenMutable()[i]->IsFoldable()) {
 			// non-scalar expression
 			all_scalar = false;
 		}
 	}
-	if (expr.children.size() == 2) {
+	if (expr.GetChildrenMutable().size() == 2) {
 		// only one child
 		// IN: turn into X = 1
 		// NOT IN: turn into X <> 1
-		return make_unique<BoundComparisonExpression>(is_regular_in ? ExpressionType::COMPARE_EQUAL
-		                                                            : ExpressionType::COMPARE_NOTEQUAL,
-		                                              move(expr.children[0]), move(expr.children[1]));
+		return BoundComparisonExpression::Create(
+		    is_regular_in ? ExpressionType::COMPARE_EQUAL : ExpressionType::COMPARE_NOTEQUAL,
+		    std::move(expr.GetChildrenMutable()[0]), std::move(expr.GetChildrenMutable()[1]));
 	}
-	if (expr.children.size() < 6 || !all_scalar) {
+	if (expr.GetChildrenMutable().size() < IN_CLAUSE_REWRITE_THRESHOLD || !all_scalar) {
 		// low amount of children or not all scalar
 		// IN: turn into (X = 1 OR X = 2 OR X = 3...)
 		// NOT IN: turn into (X <> 1 AND X <> 2 AND X <> 3 ...)
-		auto conjunction = make_unique<BoundConjunctionExpression>(is_regular_in ? ExpressionType::CONJUNCTION_OR
-		                                                                         : ExpressionType::CONJUNCTION_AND);
-		for (idx_t i = 1; i < expr.children.size(); i++) {
-			conjunction->children.push_back(make_unique<BoundComparisonExpression>(
+		auto conjunction = make_uniq<BoundConjunctionExpression>(is_regular_in ? ExpressionType::CONJUNCTION_OR
+		                                                                       : ExpressionType::CONJUNCTION_AND);
+		for (idx_t i = 1; i < expr.GetChildrenMutable().size(); i++) {
+			conjunction->GetChildrenMutable().push_back(BoundComparisonExpression::Create(
 			    is_regular_in ? ExpressionType::COMPARE_EQUAL : ExpressionType::COMPARE_NOTEQUAL,
-			    expr.children[0]->Copy(), move(expr.children[i])));
+			    expr.GetChildrenMutable()[0]->Copy(), std::move(expr.GetChildrenMutable()[i])));
 		}
-		return move(conjunction);
+		return std::move(conjunction);
 	}
 	// IN clause with many constant children
 	// generate a mark join that replaces this IN expression
 	// first generate a ColumnDataCollection from the set of expressions
 	vector<LogicalType> types = {in_type};
-	auto collection = make_unique<ColumnDataCollection>(context, types);
+	auto collection = make_uniq<ColumnDataCollection>(context, types);
 	ColumnDataAppendState append_state;
 	collection->InitializeAppend(append_state);
 
 	DataChunk chunk;
 	chunk.Initialize(context, types);
-	for (idx_t i = 1; i < expr.children.size(); i++) {
+	for (idx_t i = 1; i < expr.GetChildrenMutable().size(); i++) {
 		// resolve this expression to a constant
-		auto value = ExpressionExecutor::EvaluateScalar(context, *expr.children[i]);
-		idx_t index = chunk.size();
-		chunk.SetCardinality(chunk.size() + 1);
-		chunk.SetValue(0, index, value);
-		if (chunk.size() == STANDARD_VECTOR_SIZE || i + 1 == expr.children.size()) {
+		Value value;
+		if (!ExpressionExecutor::TryEvaluateScalar(context, *expr.GetChildrenMutable()[i], value)) {
+			// error while evaluating scalar
+			return nullptr;
+		}
+		chunk.data[0].Append(value);
+		if (chunk.size() == STANDARD_VECTOR_SIZE || i + 1 == expr.GetChildrenMutable().size()) {
 			// chunk full: append to chunk collection
 			collection->Append(append_state, chunk);
 			chunk.Reset();
@@ -84,30 +96,42 @@ unique_ptr<Expression> InClauseRewriter::VisitReplace(BoundOperatorExpression &e
 	}
 	// now generate a ChunkGet that scans this collection
 	auto chunk_index = optimizer.binder.GenerateTableIndex();
-	auto chunk_scan = make_unique<LogicalColumnDataGet>(chunk_index, types, move(collection));
+	auto chunk_scan = make_uniq<LogicalColumnDataGet>(chunk_index, types, std::move(collection));
 
 	// then we generate the MARK join with the chunk scan on the RHS
-	auto join = make_unique<LogicalComparisonJoin>(JoinType::MARK);
-	join->mark_index = chunk_index;
-	join->AddChild(move(root));
-	join->AddChild(move(chunk_scan));
+	auto mark_index = optimizer.binder.GenerateTableIndex();
+	auto join = make_uniq<LogicalComparisonJoin>(JoinType::MARK);
+	join->mark_index = mark_index;
+	join->AddChild(std::move(root));
+	join->AddChild(std::move(chunk_scan));
 	// create the JOIN condition
-	JoinCondition cond;
-	cond.left = move(expr.children[0]);
+	JoinCondition cond(std::move(expr.GetChildrenMutable()[0]),
+	                   make_uniq<BoundColumnRefExpression>(in_type, ColumnBinding(chunk_index, ProjectionIndex(0))),
+	                   ExpressionType::COMPARE_EQUAL);
+	join->conditions.push_back(std::move(cond));
+	root = std::move(join);
 
-	cond.right = make_unique<BoundColumnRefExpression>(in_type, ColumnBinding(chunk_index, 0));
-	cond.comparison = ExpressionType::COMPARE_EQUAL;
-	join->conditions.push_back(move(cond));
-	root = move(join);
+	if (current_op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		// project out the mark index again
+		auto &filter = current_op->Cast<LogicalFilter>();
+		if (filter.projection_map.empty()) {
+			auto child_bindings = root->GetColumnBindings();
+			for (idx_t i = 0; i < child_bindings.size(); i++) {
+				if (child_bindings[i].table_index != mark_index) {
+					filter.projection_map.emplace_back(i);
+				}
+			}
+		}
+	}
 
 	// we replace the original subquery with a BoundColumnRefExpression referring to the mark column
-	unique_ptr<Expression> result =
-	    make_unique<BoundColumnRefExpression>("IN (...)", LogicalType::BOOLEAN, ColumnBinding(chunk_index, 0));
+	unique_ptr<Expression> result = make_uniq<BoundColumnRefExpression>("IN (...)", LogicalType::BOOLEAN,
+	                                                                    ColumnBinding(mark_index, ProjectionIndex(0)));
 	if (!is_regular_in) {
 		// NOT IN: invert
-		auto invert = make_unique<BoundOperatorExpression>(ExpressionType::OPERATOR_NOT, LogicalType::BOOLEAN);
-		invert->children.push_back(move(result));
-		result = move(invert);
+		auto invert = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_NOT, LogicalType::BOOLEAN);
+		invert->GetChildrenMutable().push_back(std::move(result));
+		result = std::move(invert);
 	}
 	return result;
 }

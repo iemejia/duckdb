@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/storage/checkpoint_manager.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
 
 namespace duckdb {
 struct ColumnCheckpointState;
@@ -18,50 +19,69 @@ class ColumnSegment;
 class RowGroup;
 class BaseStatistics;
 class SegmentStatistics;
+class MetadataWriter;
 
 // Writes data for an entire row group.
 class RowGroupWriter {
 public:
-	RowGroupWriter(TableCatalogEntry &table, PartialBlockManager &partial_block_manager)
-	    : table(table), partial_block_manager(partial_block_manager) {
-	}
+	RowGroupWriter(TableDataWriter &writer, TableCatalogEntry &table, PartialBlockManager &partial_block_manager);
 	virtual ~RowGroupWriter() {
 	}
 
-	CompressionType GetColumnCompressionType(idx_t i);
+	const vector<CompressionType> &GetCompressionTypes() const {
+		return compression_types;
+	}
 
-	virtual void WriteColumnDataPointers(ColumnCheckpointState &column_checkpoint_state) = 0;
+	virtual CheckpointOptions GetCheckpointOptions() const = 0;
+	virtual WriteStream &GetPayloadWriter() = 0;
+	virtual MetaBlockPointer GetMetaBlockPointer() = 0;
+	virtual optional_ptr<MetadataManager> GetMetadataManager() = 0;
+	virtual void StartWritingColumns(vector<MetaBlockPointer> &column_metadata) {
+	}
+	virtual void FinishWritingColumns() {
+	}
 
-	virtual MetaBlockWriter &GetPayloadWriter() = 0;
-
-	void RegisterPartialBlock(PartialBlockAllocation &&allocation);
-	PartialBlockAllocation GetBlockAllocation(uint32_t segment_size);
-
+	DatabaseInstance &GetDatabase();
+	AttachedDatabase &GetAttachedDatabase();
+	TableDataWriter &GetTableWriter() {
+		return writer;
+	}
 	PartialBlockManager &GetPartialBlockManager() {
 		return partial_block_manager;
 	}
+	void SetHasUnloadedColumn(idx_t column_idx) {
+		has_unloaded_columns.insert(column_idx);
+	}
+	unordered_set<idx_t> GetUnloadedColumns() const {
+		return has_unloaded_columns;
+	}
 
 protected:
+	TableDataWriter &writer;
 	TableCatalogEntry &table;
 	PartialBlockManager &partial_block_manager;
+	vector<CompressionType> compression_types;
+	unordered_set<idx_t> has_unloaded_columns;
 };
 
 // Writes data for an entire row group.
 class SingleFileRowGroupWriter : public RowGroupWriter {
 public:
 	SingleFileRowGroupWriter(TableCatalogEntry &table, PartialBlockManager &partial_block_manager,
-	                         MetaBlockWriter &table_data_writer)
-	    : RowGroupWriter(table, partial_block_manager), table_data_writer(table_data_writer) {
-	}
-
-	//! MetaBlockWriter is a cursor on a given BlockManager. This returns the
-	//! cursor against which we should write payload data for the specified RowGroup.
-	MetaBlockWriter &table_data_writer;
+	                         TableDataWriter &writer, MetadataWriter &table_data_writer);
 
 public:
-	virtual void WriteColumnDataPointers(ColumnCheckpointState &column_checkpoint_state) override;
+	CheckpointOptions GetCheckpointOptions() const override;
+	WriteStream &GetPayloadWriter() override;
+	MetaBlockPointer GetMetaBlockPointer() override;
+	optional_ptr<MetadataManager> GetMetadataManager() override;
+	void StartWritingColumns(vector<MetaBlockPointer> &column_metadata) override;
+	void FinishWritingColumns() override;
 
-	virtual MetaBlockWriter &GetPayloadWriter() override;
+private:
+	//! MetadataWriter is a cursor on a given BlockManager. This returns the
+	//! cursor against which we should write payload data for the specified RowGroup.
+	MetadataWriter &table_data_writer;
 };
 
 } // namespace duckdb

@@ -18,8 +18,9 @@ function setup_clean_test_db(f::Function, args...)
         "track"
     ]
     con = DBInterface.connect(DuckDB.DB)
+    datadir = joinpath(@__DIR__, "../data")
     for table in tables
-        DBInterface.execute(con, "CREATE TABLE $table AS SELECT * FROM 'data/$table.parquet'")
+        DBInterface.execute(con, "CREATE TABLE $table AS SELECT * FROM '$datadir/$table.parquet'")
     end
 
     try
@@ -170,6 +171,7 @@ end
         DuckDB.drop!(db, "temp")
 
         DBInterface.execute(db, "CREATE TABLE temp AS SELECT * FROM Album")
+        # FIXME Does it make sense to use named parameters here?
         r = DBInterface.execute(db, "SELECT * FROM temp LIMIT ?", (a = 3,)) |> columntable
         @test length(r) == 3 && length(r[1]) == 3
         r = DBInterface.execute(db, "SELECT * FROM temp LIMIT ?", a = 3) |> columntable

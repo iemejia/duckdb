@@ -3,16 +3,15 @@
 #include "test_helpers.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 TEST_CASE("Test that database size does not grow after many checkpoints", "[storage][.]") {
 	constexpr idx_t VALUE_COUNT = 10000;
 	idx_t expected_sum = 0;
 
-	unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
+	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
 	auto config = GetTestConfig();
-	unique_ptr<DuckDB> database;
-	unique_ptr<QueryResult> result;
+	duckdb::unique_ptr<DuckDB> database;
+	duckdb::unique_ptr<QueryResult> result;
 	auto storage_database = TestCreatePath("dbsize_test");
 
 	// make sure the database does not exist

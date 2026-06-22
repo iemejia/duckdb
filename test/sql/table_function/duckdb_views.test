@@ -2,9 +2,6 @@
 # description: Test duckdb_views function
 # group: [table_function]
 
-require skip_reload
-
-
 query I
 SELECT COUNT(*) FROM duckdb_views;
 ----
@@ -23,15 +20,33 @@ statement ok
 CREATE VIEW myschema.v2 AS SELECT 42;
 
 query III
-SELECT schema_name, view_name, temporary FROM duckdb_views() WHERE NOT internal ORDER BY view_name;
+SELECT schema_name, view_name, temporary
+FROM duckdb_views() WHERE NOT internal ORDER BY ALL;
 ----
 main	v1	False
+main	v2	True
 myschema	v2	False
-temp	v2	True
+
+query I
+SELECT database_name = current_database() OR database_name = 'temp'
+FROM duckdb_views() WHERE NOT internal ORDER BY view_name;
+----
+True
+True
+True
 
 query III
-SELECT schema_name, view_name, temporary FROM duckdb_views ORDER BY view_name;
+SELECT schema_name, view_name, temporary
+FROM duckdb_views ORDER BY ALL;
 ----
 main	v1	False
+main	v2	True
 myschema	v2	False
-temp	v2	True
+
+query I
+SELECT database_name = current_database() OR database_name = 'temp'
+FROM duckdb_views ORDER BY view_name;
+----
+True
+True
+True

@@ -7,15 +7,15 @@ namespace duckdb {
 
 CaseSimplificationRule::CaseSimplificationRule(ExpressionRewriter &rewriter) : Rule(rewriter) {
 	// match on a CaseExpression that has a ConstantExpression as a check
-	auto op = make_unique<CaseExpressionMatcher>();
-	root = move(op);
+	auto op = make_uniq<CaseExpressionMatcher>();
+	root = std::move(op);
 }
 
-unique_ptr<Expression> CaseSimplificationRule::Apply(LogicalOperator &op, vector<Expression *> &bindings,
+unique_ptr<Expression> CaseSimplificationRule::Apply(LogicalOperator &op, vector<reference<Expression>> &bindings,
                                                      bool &changes_made, bool is_root) {
-	auto root = (BoundCaseExpression *)bindings[0];
-	for (idx_t i = 0; i < root->case_checks.size(); i++) {
-		auto &case_check = root->case_checks[i];
+	auto &root = bindings[0].get().Cast<BoundCaseExpression>();
+	for (idx_t i = 0; i < root.CaseChecksMutable().size(); i++) {
+		auto &case_check = root.CaseChecksMutable()[i];
 		if (case_check.when_expr->IsFoldable()) {
 			// the WHEN check is a foldable expression
 			// use an ExpressionExecutor to execute the expression
@@ -25,21 +25,22 @@ unique_ptr<Expression> CaseSimplificationRule::Apply(LogicalOperator &op, vector
 			auto condition = constant_value.DefaultCastAs(LogicalType::BOOLEAN);
 			if (condition.IsNull() || !BooleanValue::Get(condition)) {
 				// the condition is always false: remove this case check
-				root->case_checks.erase(root->case_checks.begin() + i);
+				root.CaseChecksMutable().erase_at(i);
 				i--;
 			} else {
 				// the condition is always true
 				// move the THEN clause to the ELSE of the case
-				root->else_expr = move(case_check.then_expr);
+				root.ElseMutable() = std::move(case_check.then_expr);
 				// remove this case check and any case checks after this one
-				root->case_checks.erase(root->case_checks.begin() + i, root->case_checks.end());
+				root.CaseChecksMutable().erase(root.CaseChecksMutable().begin() + NumericCast<int64_t>(i),
+				                               root.CaseChecksMutable().end());
 				break;
 			}
 		}
 	}
-	if (root->case_checks.empty()) {
+	if (root.CaseChecksMutable().empty()) {
 		// no case checks left: return the ELSE expression
-		return move(root->else_expr);
+		return std::move(root.ElseMutable());
 	}
 	return nullptr;
 }

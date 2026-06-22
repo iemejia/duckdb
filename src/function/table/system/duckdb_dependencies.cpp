@@ -1,6 +1,7 @@
 #include "duckdb/function/table/system_functions.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -8,9 +9,13 @@
 namespace duckdb {
 
 struct DependencyInformation {
-	CatalogEntry *object;
-	CatalogEntry *dependent;
-	DependencyType type;
+	DependencyInformation(CatalogEntry &object, CatalogEntry &dependent, const DependencyDependentFlags &flags)
+	    : object(object), dependent(dependent), flags(flags) {
+	}
+
+	CatalogEntry &object;
+	CatalogEntry &dependent;
+	DependencyDependentFlags flags;
 };
 
 struct DuckDBDependenciesData : public GlobalTableFunctionState {
@@ -48,24 +53,23 @@ static unique_ptr<FunctionData> DuckDBDependenciesBind(ClientContext &context, T
 }
 
 unique_ptr<GlobalTableFunctionState> DuckDBDependenciesInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto result = make_unique<DuckDBDependenciesData>();
+	auto result = make_uniq<DuckDBDependenciesData>();
 
 	// scan all the schemas and collect them
-	auto &catalog = Catalog::GetCatalog(context);
-	auto &dependency_manager = catalog.GetDependencyManager();
-	dependency_manager.Scan([&](CatalogEntry *obj, CatalogEntry *dependent, DependencyType type) {
-		DependencyInformation info;
-		info.object = obj;
-		info.dependent = dependent;
-		info.type = type;
-		result->entries.push_back(info);
-	});
+	auto &catalog = Catalog::GetCatalog(context, Identifier::InvalidCatalog());
+	auto dependency_manager = catalog.GetDependencyManager();
+	if (dependency_manager) {
+		dependency_manager->Scan(
+		    context, [&](CatalogEntry &obj, CatalogEntry &dependent, const DependencyDependentFlags &flags) {
+			    result->entries.emplace_back(obj, dependent, flags);
+		    });
+	}
 
-	return move(result);
+	return std::move(result);
 }
 
 void DuckDBDependenciesFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = (DuckDBDependenciesData &)*data_p.global_state;
+	auto &data = data_p.global_state->Cast<DuckDBDependenciesData>();
 	if (data.offset >= data.entries.size()) {
 		// finished returning values
 		return;
@@ -73,40 +77,42 @@ void DuckDBDependenciesFunction(ClientContext &context, TableFunctionInput &data
 	// start returning values
 	// either fill up the chunk or return all the remaining columns
 	idx_t count = 0;
+
+	// classid, LogicalType::BIGINT
+	auto &classid = output.data[0];
+	// objid, LogicalType::BIGINT
+	auto &objid = output.data[1];
+	// objsubid, LogicalType::INTEGER
+	auto &objsubid = output.data[2];
+	// refclassid, LogicalType::BIGINT
+	auto &refclassid = output.data[3];
+	// refobjid, LogicalType::BIGINT
+	auto &refobjid = output.data[4];
+	// refobjsubid, LogicalType::INTEGER
+	auto &refobjsubid = output.data[5];
+	// deptype, LogicalType::VARCHAR
+	auto &deptype = output.data[6];
+
 	while (data.offset < data.entries.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &entry = data.entries[data.offset];
 
-		// return values:
-		// classid, LogicalType::BIGINT
-		output.SetValue(0, count, Value::BIGINT(0));
-		// objid, LogicalType::BIGINT
-		output.SetValue(1, count, Value::BIGINT(entry.object->oid));
-		// objsubid, LogicalType::INTEGER
-		output.SetValue(2, count, Value::INTEGER(0));
-		// refclassid, LogicalType::BIGINT
-		output.SetValue(3, count, Value::BIGINT(0));
-		// refobjid, LogicalType::BIGINT
-		output.SetValue(4, count, Value::BIGINT(entry.dependent->oid));
-		// refobjsubid, LogicalType::INTEGER
-		output.SetValue(5, count, Value::INTEGER(0));
-		// deptype, LogicalType::VARCHAR
+		classid.Append(Value::BIGINT(0));
+		objid.Append(Value::BIGINT(NumericCast<int64_t>(entry.object.oid)));
+		objsubid.Append(Value::INTEGER(0));
+		refclassid.Append(Value::BIGINT(0));
+		refobjid.Append(Value::BIGINT(NumericCast<int64_t>(entry.dependent.oid)));
+		refobjsubid.Append(Value::INTEGER(0));
 		string dependency_type_str;
-		switch (entry.type) {
-		case DependencyType::DEPENDENCY_REGULAR:
+		if (entry.flags.IsBlocking()) {
 			dependency_type_str = "n";
-			break;
-		case DependencyType::DEPENDENCY_AUTOMATIC:
+		} else {
 			dependency_type_str = "a";
-			break;
-		default:
-			throw NotImplementedException("Unimplemented dependency type");
 		}
-		output.SetValue(6, count, Value(dependency_type_str));
+		deptype.Append(Value(dependency_type_str));
 
 		data.offset++;
 		count++;
 	}
-	output.SetCardinality(count);
 }
 
 void DuckDBDependenciesFun::RegisterFunction(BuiltinFunctions &set) {

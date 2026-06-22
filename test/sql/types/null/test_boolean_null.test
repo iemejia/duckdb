@@ -3,7 +3,7 @@
 # group: [null]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 # AND
 query TTTTTTTTT
@@ -29,7 +29,7 @@ SELECT NULL IS NULL, NULL IS NOT NULL, 42 IS NULL, 42 IS NOT NULL
 ----
 1	0	0	1
 
-# Comparisions
+# Comparisons
 query TTTT
 SELECT NULL = NULL, NULL <> NULL, 42 = NULL, 42 <> NULL
 ----

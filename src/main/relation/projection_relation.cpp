@@ -2,23 +2,25 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/common/exception/parser_exception.hpp"
 
 namespace duckdb {
 
 ProjectionRelation::ProjectionRelation(shared_ptr<Relation> child_p,
-                                       vector<unique_ptr<ParsedExpression>> parsed_expressions, vector<string> aliases)
-    : Relation(child_p->context, RelationType::PROJECTION_RELATION), expressions(move(parsed_expressions)),
-      child(move(child_p)) {
+                                       vector<unique_ptr<ParsedExpression>> parsed_expressions,
+                                       vector<Identifier> aliases)
+    : Relation(child_p->context, RelationType::PROJECTION_RELATION), expressions(std::move(parsed_expressions)),
+      child(std::move(child_p)) {
 	if (!aliases.empty()) {
 		if (aliases.size() != expressions.size()) {
 			throw ParserException("Aliases list length must match expression list length!");
 		}
 		for (idx_t i = 0; i < aliases.size(); i++) {
-			expressions[i]->alias = aliases[i];
+			expressions[i]->SetAlias(aliases[i]);
 		}
 	}
 	// bind the expressions
-	context.GetContext()->TryBindRelation(*this, this->columns);
+	TryBindRelation(columns);
 }
 
 unique_ptr<QueryNode> ProjectionRelation::GetQueryNode() {
@@ -32,12 +34,12 @@ unique_ptr<QueryNode> ProjectionRelation::GetQueryNode() {
 		result = child->GetQueryNode();
 	} else {
 		// child node is not a join: create a new select node and push the child as a table reference
-		auto select = make_unique<SelectNode>();
+		auto select = make_uniq<SelectNode>();
 		select->from_table = child->GetTableRef();
-		result = move(select);
+		result = std::move(select);
 	}
 	D_ASSERT(result->type == QueryNodeType::SELECT_NODE);
-	auto &select_node = (SelectNode &)*result;
+	auto &select_node = result->Cast<SelectNode>();
 	select_node.aggregate_handling = AggregateHandling::NO_AGGREGATES_ALLOWED;
 	select_node.select_list.clear();
 	for (auto &expr : expressions) {
@@ -46,7 +48,7 @@ unique_ptr<QueryNode> ProjectionRelation::GetQueryNode() {
 	return result;
 }
 
-string ProjectionRelation::GetAlias() {
+Identifier ProjectionRelation::GetAlias() {
 	return child->GetAlias();
 }
 
@@ -60,7 +62,7 @@ string ProjectionRelation::ToString(idx_t depth) {
 		if (i != 0) {
 			str += ", ";
 		}
-		str += expressions[i]->ToString() + " as " + expressions[i]->alias;
+		str += expressions[i]->ToString() + " as " + expressions[i]->GetAlias();
 	}
 	str += "]\n";
 	return str + child->ToString(depth + 1);

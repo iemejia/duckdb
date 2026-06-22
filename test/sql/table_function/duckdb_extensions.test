@@ -12,6 +12,9 @@ SELECT aliases FROM duckdb_extensions() WHERE extension_name='postgres_scanner';
 
 require tpch
 
+statement ok
+LOAD tpch;
+
 query I
 SELECT extension_name FROM duckdb_extensions() WHERE loaded AND extension_name='tpch';
 ----

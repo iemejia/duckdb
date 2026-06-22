@@ -1,105 +1,170 @@
 #include "duckdb/execution/index/art/art_key.hpp"
-
-#include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/common/types/geometry.hpp"
 
 namespace duckdb {
 
-Key::Key() : len(0) {
+//===--------------------------------------------------------------------===//
+// ARTKey
+//===--------------------------------------------------------------------===//
+
+ARTKey::ARTKey() : len(0) {
 }
 
-Key::Key(data_ptr_t data, idx_t len) : len(len), data(data) {
+ARTKey::ARTKey(const data_ptr_t data, idx_t len) : len(len), data(data) {
 }
 
-Key::Key(ArenaAllocator &allocator, idx_t len) : len(len) {
+ARTKey::ARTKey(ArenaAllocator &allocator, idx_t len) : len(len) {
 	data = allocator.Allocate(len);
 }
 
 template <>
-Key Key::CreateKey(ArenaAllocator &allocator, string_t value) {
-	idx_t len = value.GetSize() + 1;
-	auto data = allocator.Allocate(len);
-	memcpy(data, value.GetDataUnsafe(), len - 1);
-	data[len - 1] = '\0';
-	return Key(data, len);
+ARTKey ARTKey::CreateARTKey(ArenaAllocator &allocator, string_t value) {
+	auto string_data = const_data_ptr_cast(value.GetData());
+	auto string_len = value.GetSize();
+
+	// We escape \00 and \01.
+	idx_t escape_count = 0;
+	for (idx_t i = 0; i < string_len; i++) {
+		if (string_data[i] <= 1) {
+			escape_count++;
+		}
+	}
+
+	idx_t key_len = string_len + escape_count + 1;
+	auto key_data = allocator.Allocate(key_len);
+
+	// Copy over the data and add escapes.
+	idx_t pos = 0;
+	for (idx_t i = 0; i < string_len; i++) {
+		if (string_data[i] <= 1) {
+			// Add escape.
+			key_data[pos++] = '\01';
+		}
+		key_data[pos++] = string_data[i];
+	}
+
+	// End with a null-terminator.
+	key_data[pos] = '\0';
+	return ARTKey(key_data, key_len);
 }
 
 template <>
-Key Key::CreateKey(ArenaAllocator &allocator, const char *value) {
-	return Key::CreateKey(allocator, string_t(value, strlen(value)));
+ARTKey ARTKey::CreateARTKey(ArenaAllocator &allocator, const char *value) {
+	return ARTKey::CreateARTKey(allocator, string_t(value, UnsafeNumericCast<uint32_t>(strlen(value))));
 }
 
 template <>
-void Key::CreateKey(ArenaAllocator &allocator, Key &key, string_t value) {
-	key.len = value.GetSize() + 1;
-	key.data = allocator.Allocate(key.len);
-	memcpy(key.data, value.GetDataUnsafe(), key.len - 1);
-	key.data[key.len - 1] = '\0';
+void ARTKey::CreateARTKey(ArenaAllocator &allocator, ARTKey &key, string_t value) {
+	key = ARTKey::CreateARTKey<string_t>(allocator, value);
 }
 
 template <>
-void Key::CreateKey(ArenaAllocator &allocator, Key &key, const char *value) {
-	Key::CreateKey(allocator, key, string_t(value, strlen(value)));
+void ARTKey::CreateARTKey(ArenaAllocator &allocator, ARTKey &key, const char *value) {
+	ARTKey::CreateARTKey(allocator, key, string_t(value, UnsafeNumericCast<uint32_t>(strlen(value))));
 }
 
-bool Key::operator>(const Key &k) const {
-	for (idx_t i = 0; i < MinValue<idx_t>(len, k.len); i++) {
-		if (data[i] > k.data[i]) {
+ARTKey ARTKey::CreateKey(ArenaAllocator &allocator, Value &value, StorageVersion storage_version) {
+	const auto &type = value.type();
+	D_ASSERT(type.InternalType() == value.type().InternalType());
+
+	if (type.id() == LogicalTypeId::GEOMETRY &&
+	    (storage_version == StorageVersion::INVALID || (storage_version < StorageVersion::V1_5_0))) {
+		// Convert to old-style geometry for older storage versions.
+		string buffer;
+		Geometry::ToSpatialGeometry(value.GetValueUnsafe<string>(), buffer);
+		return ARTKey::CreateARTKey(allocator, string_t(buffer));
+	}
+
+	switch (type.InternalType()) {
+	case PhysicalType::BOOL:
+		return ARTKey::CreateARTKey<bool>(allocator, value);
+	case PhysicalType::INT8:
+		return ARTKey::CreateARTKey<int8_t>(allocator, value);
+	case PhysicalType::INT16:
+		return ARTKey::CreateARTKey<int16_t>(allocator, value);
+	case PhysicalType::INT32:
+		return ARTKey::CreateARTKey<int32_t>(allocator, value);
+	case PhysicalType::INT64:
+		return ARTKey::CreateARTKey<int64_t>(allocator, value);
+	case PhysicalType::UINT8:
+		return ARTKey::CreateARTKey<uint8_t>(allocator, value);
+	case PhysicalType::UINT16:
+		return ARTKey::CreateARTKey<uint16_t>(allocator, value);
+	case PhysicalType::UINT32:
+		return ARTKey::CreateARTKey<uint32_t>(allocator, value);
+	case PhysicalType::UINT64:
+		return ARTKey::CreateARTKey<uint64_t>(allocator, value);
+	case PhysicalType::INT128:
+		return ARTKey::CreateARTKey<hugeint_t>(allocator, value);
+	case PhysicalType::UINT128:
+		return ARTKey::CreateARTKey<uhugeint_t>(allocator, value);
+	case PhysicalType::FLOAT:
+		return ARTKey::CreateARTKey<float>(allocator, value);
+	case PhysicalType::DOUBLE:
+		return ARTKey::CreateARTKey<double>(allocator, value);
+	case PhysicalType::VARCHAR:
+		return ARTKey::CreateARTKey<string_t>(allocator, value);
+	default:
+		throw InternalException("Invalid type for the ART key.");
+	}
+}
+
+bool ARTKey::operator>(const ARTKey &key) const {
+	for (idx_t i = 0; i < MinValue(len, key.len); i++) {
+		if (data[i] > key.data[i]) {
 			return true;
-		} else if (data[i] < k.data[i]) {
+		} else if (data[i] < key.data[i]) {
 			return false;
 		}
 	}
-	return len > k.len;
+	return len > key.len;
 }
 
-bool Key::operator<(const Key &k) const {
-	for (idx_t i = 0; i < MinValue<idx_t>(len, k.len); i++) {
-		if (data[i] < k.data[i]) {
+bool ARTKey::operator>=(const ARTKey &key) const {
+	for (idx_t i = 0; i < MinValue(len, key.len); i++) {
+		if (data[i] > key.data[i]) {
 			return true;
-		} else if (data[i] > k.data[i]) {
+		} else if (data[i] < key.data[i]) {
 			return false;
 		}
 	}
-	return len < k.len;
+	return len >= key.len;
 }
 
-bool Key::operator>=(const Key &k) const {
-	for (idx_t i = 0; i < MinValue<idx_t>(len, k.len); i++) {
-		if (data[i] > k.data[i]) {
-			return true;
-		} else if (data[i] < k.data[i]) {
-			return false;
-		}
-	}
-	return len >= k.len;
-}
-
-bool Key::operator==(const Key &k) const {
-	if (len != k.len) {
+bool ARTKey::operator==(const ARTKey &key) const {
+	if (len != key.len) {
 		return false;
 	}
 	for (idx_t i = 0; i < len; i++) {
-		if (data[i] != k.data[i]) {
+		if (data[i] != key.data[i]) {
 			return false;
 		}
 	}
 	return true;
 }
 
-bool Key::ByteMatches(Key &other, idx_t &depth) {
-	return data[depth] == other[depth];
-}
-
-bool Key::Empty() {
-	return len == 0;
-}
-
-void Key::ConcatenateKey(ArenaAllocator &allocator, Key &other_key) {
-
-	auto compound_data = allocator.Allocate(len + other_key.len);
+void ARTKey::Concat(ArenaAllocator &allocator, const ARTKey &other) {
+	auto compound_data = allocator.Allocate(len + other.len);
 	memcpy(compound_data, data, len);
-	memcpy(compound_data + len, other_key.data, other_key.len);
-	len += other_key.len;
+	memcpy(compound_data + len, other.data, other.len);
+	len += other.len;
 	data = compound_data;
 }
+
+row_t ARTKey::GetRowId() const {
+	D_ASSERT(len == sizeof(row_t));
+	return Radix::DecodeData<row_t>(data);
+}
+
+idx_t ARTKey::GetMismatchPos(const ARTKey &other, const idx_t start) const {
+	D_ASSERT(len <= other.len);
+	D_ASSERT(start <= len);
+	for (idx_t i = start; i < other.len; i++) {
+		if (data[i] != other.data[i]) {
+			return i;
+		}
+	}
+	throw FatalException("Corrupted ART index - likely the same row id was inserted twice into the same ART");
+}
+
 } // namespace duckdb

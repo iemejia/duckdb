@@ -14,8 +14,11 @@ namespace duckdb {
 
 class BoundDefaultExpression : public Expression {
 public:
+	static constexpr const ExpressionClass TYPE = ExpressionClass::BOUND_DEFAULT;
+
+public:
 	explicit BoundDefaultExpression(LogicalType type = LogicalType())
-	    : Expression(ExpressionType::VALUE_DEFAULT, ExpressionClass::BOUND_DEFAULT, type) {
+	    : Expression(ExpressionType::VALUE_DEFAULT, ExpressionClass::BOUND_DEFAULT, std::move(type)) {
 	}
 
 public:
@@ -30,11 +33,11 @@ public:
 		return "DEFAULT";
 	}
 
-	unique_ptr<Expression> Copy() override {
-		return make_unique<BoundDefaultExpression>(return_type);
+	unique_ptr<Expression> Copy() const override {
+		return make_uniq<BoundDefaultExpression>(return_type);
 	}
 
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<Expression> Deserialize(ExpressionDeserializationState &state, FieldReader &reader);
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<Expression> Deserialize(Deserializer &deserializer);
 };
 } // namespace duckdb

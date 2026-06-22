@@ -34,11 +34,6 @@ public:
 
 	static void InitializeBenchmarkDirectory();
 
-	//! Save the current database state, exporting it to a set of CSVs in the DUCKDB_BENCHMARK_DIRECTORY directory
-	static void SaveDatabase(DuckDB &db, string name);
-	//! Try to initialize the database from the DUCKDB_BENCHMARK_DIRECTORY
-	static bool TryLoadDatabase(DuckDB &db, string name);
-
 	//! Register a benchmark in the Benchmark Runner, this is done automatically
 	//! as long as the proper macro's are used
 	static void RegisterBenchmark(Benchmark *benchmark);
@@ -47,6 +42,7 @@ public:
 	void LogLine(string message);
 	void LogResult(string message);
 	void LogOutput(string message);
+	void LogSummary(string benchmark, string message, size_t i);
 
 	void RunBenchmark(Benchmark *benchmark);
 	void RunBenchmarks();
@@ -54,7 +50,9 @@ public:
 	vector<Benchmark *> benchmarks;
 	ofstream out_file;
 	ofstream log_file;
-	uint32_t threads = std::thread::hardware_concurrency();
+	uint32_t threads = MaxValue<uint32_t>(std::thread::hardware_concurrency(), 1u);
+	string memory_limit;
+	unordered_map<string, string> custom_arguments;
 };
 
 } // namespace duckdb

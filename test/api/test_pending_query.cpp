@@ -2,9 +2,10 @@
 #include "test_helpers.hpp"
 
 #include <thread>
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/main/stream_query_result.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 TEST_CASE("Test Pending Query API", "[api][.]") {
 	DuckDB db;
@@ -92,21 +93,133 @@ TEST_CASE("Test Pending Query API", "[api][.]") {
 		result = con.Query("SELECT 42");
 		REQUIRE(CHECK_COLUMN(result, 0, {42}));
 	}
+
 	SECTION("Runtime error in pending query (streaming)") {
 		// this succeeds initially
 		auto pending_query =
 		    con.PendingQuery("SELECT concat(SUM(i)::varchar, 'hello')::INT FROM range(1000000) tbl(i)", true);
 		REQUIRE(!pending_query->HasError());
-		// still succeeds...
 		auto result = pending_query->Execute();
-		REQUIRE(!result->HasError());
-		auto chunk = result->Fetch();
-		REQUIRE(!chunk);
 		REQUIRE(result->HasError());
 
 		// query the connection as normal after
 		result = con.Query("SELECT 42");
 		REQUIRE(CHECK_COLUMN(result, 0, {42}));
+	}
+	SECTION("Pending results errors as JSON") {
+		con.Query("SET errors_as_json = true;");
+		auto pending_query = con.PendingQuery("SELCT 32;");
+		REQUIRE(pending_query->HasError());
+		REQUIRE(duckdb::StringUtil::Contains(pending_query->GetError(), "SYNTAX_ERROR"));
+	}
+}
+
+TEST_CASE("Abandoned pending query must release the active query", "[api]") {
+	// A pending query created but never executed must not leak the active-query state (executor, plan,
+	// autocommit transaction). We observe the autocommit transaction it opens, which is created and
+	// released together with the active query: abandoning the pending must release it immediately, not
+	// defer it to the next query or context teardown.
+	DuckDB db;
+	Connection con(db);
+
+	REQUIRE(!con.context->transaction.HasActiveTransaction());
+
+	SECTION("Abandon via Close()") {
+		auto pending_query = con.PendingQuery("SELECT 42");
+		REQUIRE(!pending_query->HasError());
+		REQUIRE(con.context->transaction.HasActiveTransaction());
+
+		pending_query->Close();
+		REQUIRE(!con.context->transaction.HasActiveTransaction());
+	}
+	SECTION("Abandon an ATTACH via Close()") {
+		auto pending_query = con.PendingQuery("ATTACH ':memory:' AS abandoned_db");
+		REQUIRE(!pending_query->HasError());
+		REQUIRE(con.context->transaction.HasActiveTransaction());
+
+		pending_query->Close();
+		REQUIRE(!con.context->transaction.HasActiveTransaction());
+	}
+	SECTION("Abandon a prepared pending query") {
+		auto prepared = con.Prepare("SELECT 42");
+		REQUIRE(!prepared->HasError());
+		auto pending_query = prepared->PendingQuery();
+		REQUIRE(!pending_query->HasError());
+		REQUIRE(con.context->transaction.HasActiveTransaction());
+
+		pending_query->Close();
+		REQUIRE(!con.context->transaction.HasActiveTransaction());
+	}
+	// the connection must remain usable after abandoning pending queries
+	auto result = con.Query("SELECT 42");
+	REQUIRE(CHECK_COLUMN(result, 0, {42}));
+}
+
+TEST_CASE("Abandoned streaming result must release the active query", "[api]") {
+	// A streaming result keeps the active-query state alive to feed the stream; it is normally
+	// released when the stream is fully consumed. A stream abandoned before being drained must still
+	// release that state, not leak it until the next query or context teardown.
+	DuckDB db;
+	Connection con(db);
+
+	REQUIRE(!con.context->transaction.HasActiveTransaction());
+
+	SECTION("Abandon via Close() before consuming") {
+		auto result = con.SendQuery("SELECT * FROM range(10000)");
+		REQUIRE(!result->HasError());
+		REQUIRE(result->type == QueryResultType::STREAM_RESULT);
+		// the stream is in flight: the active query is still open
+		REQUIRE(con.context->transaction.HasActiveTransaction());
+
+		result->Cast<StreamQueryResult>().Close();
+		REQUIRE(!con.context->transaction.HasActiveTransaction());
+	}
+	SECTION("Abandon via Close() after a partial fetch") {
+		auto result = con.SendQuery("SELECT * FROM range(10000)");
+		REQUIRE(!result->HasError());
+		REQUIRE(result->type == QueryResultType::STREAM_RESULT);
+		auto chunk = result->Fetch(); // consume one chunk; the stream is not drained
+		REQUIRE(chunk);
+		REQUIRE(con.context->transaction.HasActiveTransaction());
+
+		result->Cast<StreamQueryResult>().Close();
+		REQUIRE(!con.context->transaction.HasActiveTransaction());
+	}
+	// the connection must remain usable after abandoning streaming results
+	auto check = con.Query("SELECT 42");
+	REQUIRE(CHECK_COLUMN(check, 0, {42}));
+}
+
+TEST_CASE("PROBE cancel a streaming producer parked on a full buffer", "[api][.]") {
+	// Force the producer to park on a full buffer (result >> streaming_buffer_size), abandon the
+	// stream mid-flight, then run another query so InitialCleanup -> CleanupInternal -> CancelTasks
+	// runs against the parked producer. If CancelTasks cannot reap a parked result-collector task,
+	// this hangs (busy-spins in `while (executor_tasks > 0) WorkOnTasks()`).
+	DuckDB db;
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
+
+	SECTION("abandon by dropping, then run another query") {
+		auto result = con.SendQuery("SELECT * FROM range(10000000)");
+		REQUIRE(!result->HasError());
+		REQUIRE(result->type == QueryResultType::STREAM_RESULT);
+		auto chunk = result->Fetch(); // ensure the pipeline is actually streaming and re-parks
+		REQUIRE(chunk);
+		result.reset(); // abandon while the producer is parked on the full buffer
+
+		auto check = con.Query("SELECT 42");
+		REQUIRE(CHECK_COLUMN(check, 0, {42}));
+	}
+	SECTION("abandon via Close(), then run another query") {
+		auto result = con.SendQuery("SELECT * FROM range(10000000)");
+		REQUIRE(!result->HasError());
+		REQUIRE(result->type == QueryResultType::STREAM_RESULT);
+		auto chunk = result->Fetch();
+		REQUIRE(chunk);
+		result->Cast<StreamQueryResult>().Close();
+
+		auto check = con.Query("SELECT 42");
+		REQUIRE(CHECK_COLUMN(check, 0, {42}));
 	}
 }
 
@@ -118,7 +231,7 @@ static void parallel_pending_query(Connection *conn, bool *correct, size_t threa
 		try {
 			// this will randomly throw an exception if another thread calls pending query first
 			auto result = executor->Execute();
-			if (!CHECK_COLUMN(result, 0, {Value(), 1, 2, 3})) {
+			if (!CHECK_COLUMN(result, 0, {1, 2, 3, Value()})) {
 				correct[threadnr] = false;
 			}
 		} catch (...) {
@@ -128,16 +241,16 @@ static void parallel_pending_query(Connection *conn, bool *correct, size_t threa
 }
 
 TEST_CASE("Test parallel usage of pending query API", "[api][.]") {
-	auto db = make_unique<DuckDB>(nullptr);
-	auto conn = make_unique<Connection>(*db);
+	auto db = make_uniq<DuckDB>(nullptr);
+	auto conn = make_uniq<Connection>(*db);
 
 	REQUIRE_NO_FAIL(conn->Query("CREATE TABLE integers(i INTEGER)"));
 	REQUIRE_NO_FAIL(conn->Query("INSERT INTO integers VALUES (1), (2), (3), (NULL)"));
 
 	bool correct[20];
-	thread threads[20];
+	std::thread threads[20];
 	for (size_t i = 0; i < 20; i++) {
-		threads[i] = thread(parallel_pending_query, conn.get(), correct, i);
+		threads[i] = std::thread(parallel_pending_query, conn.get(), correct, i);
 	}
 	for (size_t i = 0; i < 20; i++) {
 		threads[i].join();
@@ -178,10 +291,10 @@ TEST_CASE("Test Pending Query Prepared Statements API", "[api][.]") {
 		auto prepare = con.Prepare("SELECT SUM(i+X) FROM range(1000000) tbl(i) WHERE i>=$1");
 		REQUIRE(prepare->HasError());
 
-		REQUIRE_THROWS(prepare->PendingQuery(0));
+		REQUIRE_FAIL(prepare->PendingQuery(0));
 	}
 	SECTION("Error during execution") {
-		vector<Value> parameters;
+		duckdb::vector<Value> parameters;
 		auto prepared = con.Prepare("SELECT concat(SUM(i)::varchar, CASE WHEN SUM(i) IS NULL THEN 0 ELSE 'hello' "
 		                            "END)::INT FROM range(1000000) tbl(i) WHERE i>$1");
 		// this succeeds initially
@@ -190,10 +303,6 @@ TEST_CASE("Test Pending Query Prepared Statements API", "[api][.]") {
 		REQUIRE(!pending_query->HasError());
 		// still succeeds...
 		auto result = pending_query->Execute();
-		REQUIRE(!result->HasError());
-		//! fail!
-		auto chunk = result->Fetch();
-		REQUIRE(!chunk);
 		REQUIRE(result->HasError());
 
 		// query the connection as normal after
@@ -203,8 +312,7 @@ TEST_CASE("Test Pending Query Prepared Statements API", "[api][.]") {
 		// if we change the parameter this works
 		parameters = {Value::INTEGER(2000000)};
 		pending_query = prepared->PendingQuery(parameters, true);
-		REQUIRE(!pending_query->HasError());
-		// still succeeds...
+
 		result = pending_query->Execute();
 		REQUIRE(!result->HasError());
 		REQUIRE(CHECK_COLUMN(result, 0, {Value::BIGINT(0)}));

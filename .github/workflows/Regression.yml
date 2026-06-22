@@ -1,230 +1,405 @@
 name: Regression
 on:
-  push:
-    paths-ignore:
-      - '**.md'
-  pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'tools/juliapkg/**'
-      - 'tools/nodejs/**'
-      - 'tools/rpkg/**'
-      - '.github/workflows/**'
-      - '!.github/workflows/Regression.yml'
+  workflow_call:
+    inputs:
+      git_ref:
+        type: string
+      base_hash:
+        type: string
+      build_current_release:
+        default: false
+        type: boolean
+      run_slow_tests:
+        default: false
+        type: boolean
+      runner_linux_x64:
+        default: ubuntu-latest
+        type: string
+      runner_linux_small:
+        default: ubuntu-latest
+        type: string
+      save_cache:
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: 'Git ref to test for current release'
+        type: string
+      base_hash:
+        description: 'Base hash'
+        type: string
+      build_current_release:
+        description: 'Build and upload linux-release-build in this workflow'
+        default: true
+        type: boolean
+      run_slow_tests:
+        description: 'Run slow tests when applicable'
+        default: false
+        type: boolean
+      runner_linux_x64:
+        description: 'Optional x64 runner label override'
+        default: ubuntu-latest
+        type: string
+      runner_linux_small:
+        description: 'Optional small runner label override'
+        default: ubuntu-latest
+        type: string
+      save_cache:
+        default: false
+        type: boolean
+  repository_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/master' || github.sha }}
+  group: regression-${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
 
 env:
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
-  TWINE_PASSWORD: ${{ secrets.TWINE_PASSWORD }}
-  AWS_ACCESS_KEY_ID: AKIAVBLKPL2ZW2T7TYFQ
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.NODE_PRE_GYP_SECRETACCESSKEY }}
-  NODE_AUTH_TOKEN: ${{secrets.NODE_AUTH_TOKEN}}
+  GIT_REF: ${{ inputs.git_ref != '' && inputs.git_ref || github.sha }}
+  BASE_BRANCH: ${{ github.base_ref || (endsWith(github.ref_name, '_feature') && 'feature' || 'main') }}
+  BASE_HASH: ${{ inputs.base_hash }}
 
 jobs:
- regression-test-benchmark-runner:
-  name: Regression Test (${{ matrix.benchmark }})
-  runs-on: ubuntu-20.04
-  strategy:
-    fail-fast: false
-    matrix:
-      benchmark:
-        - 'micro'
-        - 'tpch'
-        - 'tpcds'
-        - 'h2oai'
-  env:
-    CC: gcc-10
-    CXX: g++-10
-    GEN: ninja
-    BUILD_BENCHMARK: 1
-    BUILD_TPCH: 1
-    BUILD_TPCDS: 1
-    BUILD_HTTPFS: 1
-    BUILD_JEMALLOC: 1
+  linux-base:
+    name: Linux Base
+    runs-on: ${{ inputs.runner_linux_x64 }}
+    env:
+      GEN: ninja
 
-  steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ env.GIT_REF }}
 
-    - uses: actions/setup-python@v2
-      with:
-        python-version: '3.7'
+      - name: Install tools
+        run: python3 scripts/ci/retry.py --timeout 2m -- make toolsci
 
-    - name: Install
-      shell: bash
-      run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build && pip install requests
+      - uses: ./.github/actions/ccache-action
 
-    - name: Setup Ccache
-      uses: hendrikmuhs/ccache-action@main
-      with:
-        key: ${{ github.job }}
+      - name: Build current release
+        if: ${{ inputs.build_current_release }}
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          BUILD_BENCHMARK: 1
+          BUILD_JEMALLOC: 1
+          CORE_EXTENSIONS: "icu;tpch;tpcds;fts;json;inet;parquet;autocomplete;test-utils;httpfs"
+          DISABLE_SANITIZER: 1
+        with:
+          build: python3 scripts/ci/retry.py -- make release
+          bundle: make release-artifact
+          upload-name: linux-release-build
+          vcpkg-commit: 84bab45d415d22042bd0b9081aea57f362da3f35
+          save-cache: ${{ inputs.save_cache }}
 
-    - name: Build
-      shell: bash
-      run: |
-        make
-        git clone https://github.com/duckdb/duckdb.git --depth=1
-        cd duckdb
-        make
-        cd ..
+      - name: Select base ref
+        run: |
+          if [[ "${{ github.repository }}" == "duckdb/duckdb" && "${{ github.ref_name }}" == "main" ]]; then
+            if [[ -z "${BASE_HASH}" ]]; then
+              BASE_REF="$(bash scripts/ci/last_main_success_commit.sh)"
+            else
+              BASE_REF="${BASE_HASH}"
+            fi
+          else
+            git fetch https://github.com/duckdb/duckdb.git "${BASE_BRANCH}:refs/remotes/duckdb/${BASE_BRANCH}"
+            if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "merge_group" ]]; then
+              BASE_REF="$(git merge-base "${GIT_REF}" "duckdb/${BASE_BRANCH}")"
+              if [[ -z "${BASE_REF}" ]]; then
+                echo "Failed to compute merge base between ${GIT_REF} and duckdb/${BASE_BRANCH}"
+                exit 1
+              fi
+            else
+              BASE_REF="duckdb/${BASE_BRANCH}"
+            fi
+          fi
+          echo "Selected base ref: ${BASE_REF}"
+          echo "Current ref: ${GIT_REF}"
+          echo "Base branch ref: duckdb/${BASE_BRANCH}"
+          echo "BASE_REF=${BASE_REF}" >> "$GITHUB_ENV"
 
-    - name: Regression Test
-      shell: bash
-      run: |
-        cp -r benchmark duckdb/
-        python scripts/regression_test_runner.py --old=duckdb/build/release/benchmark/benchmark_runner --new=build/release/benchmark/benchmark_runner --benchmarks=.github/regression/${{ matrix.benchmark }}.csv --verbose --threads=2
+      - name: Reset workspace to base ref
+        run: |
+          make clean
+          git checkout --detach "${BASE_REF}"
+          git submodule update --init --recursive
 
- regression-test-storage:
-  name: Storage Size Regression Test
-  runs-on: ubuntu-20.04
-  env:
-    CC: gcc-10
-    CXX: g++-10
-    GEN: ninja
-    BUILD_TPCH: 1
-    BUILD_TPCDS: 1
+      - name: Build base release
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          BUILD_BENCHMARK: 1
+          BUILD_JEMALLOC: 1
+          CORE_EXTENSIONS: "icu;tpch;tpcds;fts;json;inet;parquet;autocomplete;test-utils;httpfs"
+          DISABLE_SANITIZER: 1
+        with:
+          build: python3 scripts/ci/retry.py -- make release
+          bundle: make release-artifact
+          upload-name: linux-base-build
+          vcpkg-commit: 84bab45d415d22042bd0b9081aea57f362da3f35
+          save-cache: ${{ inputs.save_cache }}
 
-  steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+  regression-bench:
+    name: Bench ${{ matrix.name }}
+    needs:
+      - linux-base
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ingestion Perf
+            benchmarks: .github/regression/ingestion.csv
+          - name: Micro + TPCH + TPCH-PARQUET + TPCDS
+            benchmarks: .github/regression/micro.csv .github/regression/tpch.csv .github/regression/tpch_parquet.csv .github/regression/tpcds.csv
+          - name: H2OAI + IMDB + CSV
+            benchmarks: .github/regression/h2oai.csv .github/regression/imdb.csv .github/regression/csv.csv
+          - name: RealNest
+            benchmarks: .github/regression/realnest.csv
+            data_setup: |
+              mkdir -p duckdb_benchmark_data
+              python3 scripts/ci/retry.py -- wget -q https://blobs.duckdb.org/data/realnest/realnest.duckdb --output-document=duckdb_benchmark_data/real_nest.duckdb
 
-    - uses: actions/setup-python@v2
-      with:
-        python-version: '3.7'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.GIT_REF }}
 
-    - name: Install
-      shell: bash
-      run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build && pip install requests
+      - name: Install
+        run: |
+          python3 scripts/ci/retry.py -- make toolsci
 
-    - name: Setup Ccache
-      uses: hendrikmuhs/ccache-action@main
-      with:
-        key: ${{ github.job }}
+      - name: Download current release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-build
+          path: build/current
 
-    - name: Build
-      shell: bash
-      run: |
-        make
-        git clone https://github.com/duckdb/duckdb.git --depth=1
-        cd duckdb
-        make
-        cd ..
+      - name: Extract current release artifact
+        run: |
+          rm -rf build/current/release
+          tar -xzf build/current/release-artifact.tar.gz -C build/current
 
-    - name: Regression Test
-      shell: bash
-      run: |
-        python scripts/regression_test_storage_size.py --old=duckdb/build/release/duckdb --new=build/release/duckdb
+      - name: Download base artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-base-build
+          path: build/base
 
- regression-test-python:
-  name: Regression Test (Python Client)
-  runs-on: ubuntu-20.04
-  env:
-    CC: gcc-10
-    CXX: g++-10
-    GEN: ninja
+      - name: Extract base artifact
+        run: |
+          rm -rf build/base/release
+          tar -xzf build/base/release-artifact.tar.gz -C build/base
 
-  steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+      - name: Prepare benchmark data
+        if: ${{ matrix.data_setup }}
+        run: ${{ matrix.data_setup }}
 
-    - uses: actions/setup-python@v2
-      with:
-        python-version: '3.7'
+      - name: Run regression benchmarks
+        run: |
+          status=0
 
-    - name: Install
-      shell: bash
-      run: |
-        sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
-        pip install numpy pytest pandas mypy psutil pyarrow
+          for benchmark in ${{ matrix.benchmarks }}; do
+            extra_args=(--clear-benchmark-cache)
+            if [[ "$benchmark" == ".github/regression/realnest.csv" ]]; then
+              extra_args=()
+            fi
 
-    - name: Build Current Version
-      shell: bash
-      run: |
-        cd tools/pythonpkg
-        python setup.py install --user
-        cd ../..
+            echo "::group::$(basename "$benchmark" .csv)"
+            if ! python scripts/regression/test_runner.py \
+              --old build/base/release/benchmark/benchmark_runner \
+              --new build/current/release/benchmark/benchmark_runner \
+              --benchmarks "$benchmark" \
+              --verbose \
+              --threads 2 \
+              "${extra_args[@]}"; then
+              status=1
+              echo "::error title=Regression suite failed::$(basename "$benchmark" .csv) in ${{ matrix.name }}"
+            else
+              echo "::endgroup::"
+            fi
+          done
 
-    - name: Run New Version
-      shell: bash
-      run: |
-        python scripts/regression_test_python.py --threads=2 --out-file=new.csv
+          exit $status
 
-    - name: Cleanup New Version
-      shell: bash
-      run: |
-        cd tools/pythonpkg
-        ./clean.sh
-        cd ../..
+  regression-bench-fivetran:
+    name: Bench Fivetran
+    if: ${{ github.repository == 'duckdb/duckdb' && github.ref_name == 'main' }}
+    needs:
+      - linux-base
+    runs-on: ubuntu-24.04
 
-    - name: Build Current
-      shell: bash
-      run: |
-        git clone https://github.com/duckdb/duckdb.git --depth=1
-        cd duckdb/tools/pythonpkg
-        python setup.py install --user
-        cd ../../..
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.GIT_REF }}
 
-    - name: Run Current Version
-      shell: bash
-      run: |
-        python scripts/regression_test_python.py --threads=2 --out-file=current.csv
+      - name: Install
+        run: |
+          python3 scripts/ci/retry.py -- make toolsci
 
-    - name: Regression Test
-      shell: bash
-      run: |
-        python scripts/regression_check.py --old=current.csv --new=new.csv
+      - name: Checkout Private Regression
+        if: ${{ github.repository == 'duckdb/duckdb' && github.ref_name == 'main' }}
+        uses: actions/checkout@v6
+        with:
+          repository: duckdblabs/fivetran_regression
+          ref: main
+          token: ${{ secrets.DUCKDBLABS_BOT_TOKEN }}
+          path: benchmark/fivetran
 
- regression-test-plan-cost:
-  name: Regression Test Join Order Plan Cost
-  runs-on: ubuntu-20.04
-  strategy:
-    fail-fast: false
-    matrix:
-      benchmark:
-        - 'imdb'
-        - 'tpch'
-  env:
-    CC: gcc-10
-    CXX: g++-10
-    GEN: ninja
-    BUILD_TPCH: 1
-    BUILD_HTTPFS: 1
+      - name: Download current release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-build
+          path: build/current
 
-  steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+      - name: Extract current release artifact
+        run: |
+          rm -rf build/current/release
+          tar -xzf build/current/release-artifact.tar.gz -C build/current
 
-    - uses: actions/setup-python@v2
-      with:
-        python-version: '3.7'
+      - name: Download base artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-base-build
+          path: build/base
 
-    - name: Install
-      shell: bash
-      run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build && pip install tqdm
+      - name: Extract base artifact
+        run: |
+          rm -rf build/base/release
+          tar -xzf build/base/release-artifact.tar.gz -C build/base
 
-    - name: Setup Ccache
-      uses: hendrikmuhs/ccache-action@main
-      with:
-        key: ${{ github.job }}
+      - name: Run regression benchmark
+        run: |
+          python scripts/regression/test_runner.py --old build/base/release/benchmark/benchmark_runner --new build/current/release/benchmark/benchmark_runner --benchmarks benchmark/fivetran/benchmark_list.csv --verbose --threads 2 --clear-benchmark-cache
 
-    - name: Build
-      shell: bash
-      run: |
-        make
-        git clone https://github.com/duckdb/duckdb.git --depth=1
-        cd duckdb
-        make
-        cd ..
+  regression-test-storage:
+    name: Storage Size Regression Test
+    needs:
+      - linux-base
+    runs-on: ubuntu-24.04
 
-    - name: Regression Test
-      shell: bash
-      run: |
-        cp -r benchmark duckdb/
-        python scripts/plan_cost_runner.py --old=duckdb/build/release/duckdb --new=build/release/duckdb --dir=benchmark/${{ matrix.benchmark }}_plan_cost
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.GIT_REF }}
+
+      - name: Install
+        run: |
+          python3 scripts/ci/retry.py -- make toolsci
+
+      - name: Download current release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-build
+          path: build/current
+
+      - name: Extract current release artifact
+        run: |
+          rm -rf build/current/release
+          tar -xzf build/current/release-artifact.tar.gz -C build/current
+
+      - name: Download base artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-base-build
+          path: build/base
+
+      - name: Extract base artifact
+        run: |
+          rm -rf build/base/release
+          tar -xzf build/base/release-artifact.tar.gz -C build/base
+
+      - name: Regression Test
+        run: |
+          python scripts/regression_test_storage_size.py --old build/base/release/duckdb --new build/current/release/duckdb
+
+  regression-test-binary-size:
+    name: Regression test binary size
+    needs:
+      - linux-base
+    runs-on: ${{ inputs.runner_linux_small }}
+    env:
+      EXTENSION_STATIC_BUILD: 1
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.GIT_REF }}
+
+      - name: Install
+        run: |
+          python3 scripts/ci/retry.py -- make toolsci
+
+      - name: Download current release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-build
+          path: build/current
+
+      - name: Extract current release artifact
+        run: |
+          rm -rf build/current/release
+          tar -xzf build/current/release-artifact.tar.gz -C build/current
+
+      - name: Download base artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-base-build
+          path: build/base
+
+      - name: Extract base artifact
+        run: |
+          rm -rf build/base/release
+          tar -xzf build/base/release-artifact.tar.gz -C build/base
+
+      - name: Regression Test Extension binary size
+        run: |
+          python scripts/regression_test_extension_size.py --old build/base/release/repository --new build/current/release/repository --expect json,parquet,tpch,tpcds
+
+  regression-test-plan-cost:
+    name: Regression Test Join Order Plan Cost
+    needs:
+      - linux-base
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.GIT_REF }}
+
+      - name: Install
+        run: |
+          python3 scripts/ci/retry.py -- make toolsci
+          python3 scripts/ci/retry.py -- pip install tqdm
+
+      - name: Download current release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-build
+          path: build/current
+
+      - name: Extract current release artifact
+        run: |
+          rm -rf build/current/release
+          tar -xzf build/current/release-artifact.tar.gz -C build/current
+
+      - name: Download base artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-base-build
+          path: build/base
+
+      - name: Extract base artifact
+        run: |
+          rm -rf build/base/release
+          tar -xzf build/base/release-artifact.tar.gz -C build/base
+
+      - name: Regression Test IMDB
+        if: always()
+        run: |
+          python scripts/plan_cost_runner.py --old build/base/release/duckdb --new build/current/release/duckdb --dir=benchmark/imdb_plan_cost
+
+      - name: Regression Test TPCH
+        if: always()
+        run: |
+          python scripts/plan_cost_runner.py --old build/base/release/duckdb --new build/current/release/duckdb --dir=benchmark/tpch_plan_cost

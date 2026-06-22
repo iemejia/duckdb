@@ -14,13 +14,16 @@
 #include "duckdb/function/compression_function.hpp"
 
 namespace duckdb {
+struct UncompressedStringSegmentState;
 
 class OverflowStringWriter {
 public:
 	virtual ~OverflowStringWriter() {
 	}
 
-	virtual void WriteString(string_t string, block_id_t &result_block, int32_t &result_offset) = 0;
+	virtual void WriteString(UncompressedStringSegmentState &state, string_t string, block_id_t &result_block,
+	                         int32_t &result_offset) = 0;
+	virtual void Flush() = 0;
 };
 
 struct StringBlock {
@@ -30,28 +33,36 @@ struct StringBlock {
 	unique_ptr<StringBlock> next;
 };
 
-struct string_location_t {
-	string_location_t(block_id_t block_id, int32_t offset) : block_id(block_id), offset(offset) {
-	}
-	string_location_t() {
-	}
-	bool IsValid() {
-		return offset < Storage::BLOCK_SIZE && (block_id == INVALID_BLOCK || block_id >= MAXIMUM_BLOCK);
-	}
-	block_id_t block_id;
-	int32_t offset;
-};
-
 struct UncompressedStringSegmentState : public CompressedSegmentState {
-	~UncompressedStringSegmentState();
+	~UncompressedStringSegmentState() override;
 
 	//! The string block holding strings that do not fit in the main block
 	//! FIXME: this should be replaced by a heap that also allows freeing of unused strings
 	unique_ptr<StringBlock> head;
+	//! Map of block id to string block
+	unordered_map<block_id_t, reference<StringBlock>> overflow_blocks;
 	//! Overflow string writer (if any), if not set overflow strings will be written to memory blocks
 	unique_ptr<OverflowStringWriter> overflow_writer;
-	//! Map of block id to string block
-	unordered_map<block_id_t, StringBlock *> overflow_blocks;
+	//! The block manager with which to write
+	optional_ptr<BlockManager> block_manager;
+	//! The set of overflow blocks written to disk (if any)
+	vector<block_id_t> on_disk_blocks;
+
+public:
+	shared_ptr<BlockHandle> GetHandle(BlockManager &manager, block_id_t block_id);
+
+	void RegisterBlock(BlockManager &manager, block_id_t block_id);
+
+	string GetSegmentInfo() const override;
+
+	void InsertOverflowBlock(block_id_t block_id, reference<StringBlock> block);
+	reference<StringBlock> FindOverflowBlock(block_id_t block_id);
+
+private:
+	mutex block_lock;
+	unordered_map<block_id_t, shared_ptr<BlockHandle>> handles;
+
+	StorageLock overflow_blocks_lock;
 };
 
 } // namespace duckdb

@@ -1,220 +1,473 @@
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_operator_expression.hpp"
-#include "duckdb/planner/expression/bound_subquery_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression_binder/lateral_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
-#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cross_product.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_positional_join.hpp"
+#include "duckdb/planner/subquery/recursive_dependent_join_planner.hpp"
 #include "duckdb/planner/tableref/bound_joinref.hpp"
-#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
+//! Check if a filter can be safely pushed to the left child
+//! This is used ONLY for join conditions in the ON clause, not for WHERE clause filters.
+//! The logic determines whether a condition that references only the left side can be
+//! pushed down as a filter on the left child operator.
+static bool CanPushToLeftChild(JoinType type, JoinRefType ref_type) {
+	// Unsupported arbitrary predicates for some ASOF types
+	if (ref_type == JoinRefType::ASOF && type != JoinType::INNER && type != JoinType::LEFT) {
+		return false;
+	}
+
+	switch (type) {
+	case JoinType::INNER:
+	case JoinType::SEMI:
+	case JoinType::RIGHT:
+		return true;
+	case JoinType::ANTI:
+	case JoinType::LEFT:
+	case JoinType::OUTER:
+		return false;
+	default:
+		return false;
+	}
+}
+
+//! Check if a filter can be safely pushed to the right child
+//! This is used ONLY for join conditions in the ON clause, not for WHERE clause filters.
+//! The logic determines whether a condition that references only the right side can be
+//! pushed down as a filter on the right child operator.
+static bool CanPushToRightChild(JoinType type, JoinRefType ref_type) {
+	// Unsupported arbitrary predicates for some ASOF types
+	if (ref_type == JoinRefType::ASOF && type != JoinType::INNER && type != JoinType::LEFT) {
+		return false;
+	}
+
+	switch (type) {
+	case JoinType::INNER:
+	case JoinType::SEMI:
+	case JoinType::ANTI:
+	case JoinType::LEFT:
+		return true;
+	case JoinType::RIGHT:
+	case JoinType::OUTER:
+		return false;
+	default:
+		return false;
+	}
+}
+
+//! Push a filter expression to a child operator
+static void PushFilterToChild(unique_ptr<LogicalOperator> &child, unique_ptr<Expression> &expr) {
+	if (child->type != LogicalOperatorType::LOGICAL_FILTER) {
+		auto filter = make_uniq<LogicalFilter>();
+		filter->AddChild(std::move(child));
+		child = std::move(filter);
+	}
+
+	auto &filter = child->Cast<LogicalFilter>();
+	filter.expressions.push_back(std::move(expr));
+}
+
+//! Check if a foldable expression evaluates to TRUE and can be eliminated
+static bool CanEliminate(ClientContext &context, JoinType type, unique_ptr<Expression> &expr) {
+	if (!expr->IsFoldable()) {
+		return false;
+	}
+
+	Value result;
+	if (!ExpressionExecutor::TryEvaluateScalar(context, *expr, result)) {
+		return false;
+	}
+
+	if (result.IsNull()) {
+		return false;
+	}
+
+	bool is_true = (result == Value(true));
+
+	if (is_true) {
+		switch (type) {
+		case JoinType::INNER:
+		case JoinType::LEFT:
+		case JoinType::RIGHT:
+		case JoinType::SEMI:
+		case JoinType::ANTI:
+		case JoinType::OUTER:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	return false;
+}
+
+//! Only use conditions that are valid for the join ref type
+static bool IsJoinTypeCondition(const JoinRefType ref_type, const ExpressionType expr_type) {
+	switch (ref_type) {
+	case JoinRefType::ASOF:
+		switch (expr_type) {
+		case ExpressionType::COMPARE_EQUAL:
+		case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		case ExpressionType::COMPARE_GREATERTHAN:
+		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		case ExpressionType::COMPARE_LESSTHAN:
+			return true;
+		default:
+			return false;
+		}
+	default:
+		return true;
+	}
+}
+
+//! Check an expression is a usable comparison expression
+static bool IsComparisonExpression(const Expression &expr) {
+	switch (expr.GetExpressionType()) {
+	case ExpressionType::COMPARE_EQUAL:
+	case ExpressionType::COMPARE_NOTEQUAL:
+	case ExpressionType::COMPARE_LESSTHAN:
+	case ExpressionType::COMPARE_GREATERTHAN:
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+	case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+	case ExpressionType::COMPARE_DISTINCT_FROM:
+		return true;
+	default:
+		return false;
+	}
+}
+
 //! Create a JoinCondition from a comparison
-static bool CreateJoinCondition(Expression &expr, unordered_set<idx_t> &left_bindings,
-                                unordered_set<idx_t> &right_bindings, vector<JoinCondition> &conditions) {
+static bool CreateJoinCondition(Expression &expr, const unordered_set<TableIndex> &left_bindings,
+                                const unordered_set<TableIndex> &right_bindings, vector<JoinCondition> &conditions) {
 	// comparison
-	auto &comparison = (BoundComparisonExpression &)expr;
-	auto left_side = JoinSide::GetJoinSide(*comparison.left, left_bindings, right_bindings);
-	auto right_side = JoinSide::GetJoinSide(*comparison.right, left_bindings, right_bindings);
+	auto &comparison = expr.Cast<BoundFunctionExpression>();
+	auto &left_expr = BoundComparisonExpression::Left(comparison);
+	auto &right_expr = BoundComparisonExpression::Right(comparison);
+	auto left_side = JoinSide::GetJoinSide(left_expr, left_bindings, right_bindings);
+	auto right_side = JoinSide::GetJoinSide(right_expr, left_bindings, right_bindings);
 	if (left_side != JoinSide::BOTH && right_side != JoinSide::BOTH) {
 		// join condition can be divided in a left/right side
-		JoinCondition condition;
-		condition.comparison = expr.type;
-		auto left = move(comparison.left);
-		auto right = move(comparison.right);
+		auto comp_type = expr.GetExpressionType();
+		auto left = std::move(BoundComparisonExpression::LeftMutable(comparison));
+		auto right = std::move(BoundComparisonExpression::RightMutable(comparison));
 		if (left_side == JoinSide::RIGHT) {
 			// left = right, right = left, flip the comparison symbol and reverse sides
 			swap(left, right);
-			condition.comparison = FlipComparisionExpression(expr.type);
+			comp_type = FlipComparisonExpression(comp_type);
 		}
-		condition.left = move(left);
-		condition.right = move(right);
-		conditions.push_back(move(condition));
+		conditions.push_back(JoinCondition(std::move(left), std::move(right), comp_type));
 		return true;
 	}
 	return false;
 }
 
-unique_ptr<LogicalOperator> LogicalComparisonJoin::CreateJoin(JoinType type, unique_ptr<LogicalOperator> left_child,
-                                                              unique_ptr<LogicalOperator> right_child,
-                                                              unordered_set<idx_t> &left_bindings,
-                                                              unordered_set<idx_t> &right_bindings,
-                                                              vector<unique_ptr<Expression>> &expressions) {
-	vector<JoinCondition> conditions;
-	vector<unique_ptr<Expression>> arbitrary_expressions;
-	// first check if we can create
+//! Extract join conditions, pushing single-side filters to children when it's safe
+void LogicalComparisonJoin::ExtractJoinConditions(ClientContext &context, JoinType type, JoinRefType ref_type,
+                                                  unique_ptr<LogicalOperator> &left_child,
+                                                  unique_ptr<LogicalOperator> &right_child,
+                                                  const unordered_set<TableIndex> &left_bindings,
+                                                  const unordered_set<TableIndex> &right_bindings,
+                                                  vector<unique_ptr<Expression>> &expressions,
+                                                  vector<JoinCondition> &conditions) {
 	for (auto &expr : expressions) {
-		auto total_side = JoinSide::GetJoinSide(*expr, left_bindings, right_bindings);
-		if (total_side != JoinSide::BOTH) {
-			// join condition does not reference both sides, add it as filter under the join
-			if (type == JoinType::LEFT && total_side == JoinSide::RIGHT) {
-				// filter is on RHS and the join is a LEFT OUTER join, we can push it in the right child
-				if (right_child->type != LogicalOperatorType::LOGICAL_FILTER) {
-					// not a filter yet, push a new empty filter
-					auto filter = make_unique<LogicalFilter>();
-					filter->AddChild(move(right_child));
-					right_child = move(filter);
-				}
-				// push the expression into the filter
-				auto &filter = (LogicalFilter &)*right_child;
-				filter.expressions.push_back(move(expr));
-				continue;
-			}
-		} else if ((expr->type >= ExpressionType::COMPARE_EQUAL &&
-		            expr->type <= ExpressionType::COMPARE_GREATERTHANOREQUALTO) ||
-		           expr->type == ExpressionType::COMPARE_DISTINCT_FROM ||
-		           expr->type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
-			// comparison, check if we can create a comparison JoinCondition
-			if (CreateJoinCondition(*expr, left_bindings, right_bindings, conditions)) {
-				// successfully created the join condition
-				continue;
-			}
-		}
-		arbitrary_expressions.push_back(move(expr));
-	}
-	bool need_to_consider_arbitrary_expressions = true;
-	if (type == JoinType::INNER) {
-		// for inner joins we can push arbitrary expressions as a filter
-		// here we prefer to create a comparison join if possible
-		// that way we can use the much faster hash join to process the main join
-		// rather than doing a nested loop join to handle arbitrary expressions
+		auto side = JoinSide::GetJoinSide(*expr, left_bindings, right_bindings);
 
-		// for left and full outer joins we HAVE to process all join conditions
-		// because pushing a filter will lead to an incorrect result, as non-matching tuples cannot be filtered out
-		need_to_consider_arbitrary_expressions = false;
-	}
-	if ((need_to_consider_arbitrary_expressions && !arbitrary_expressions.empty()) || conditions.empty()) {
-		if (arbitrary_expressions.empty()) {
-			// all conditions were pushed down, add TRUE predicate
-			arbitrary_expressions.push_back(make_unique<BoundConstantExpression>(Value::BOOLEAN(true)));
-		}
-		for (auto &condition : conditions) {
-			arbitrary_expressions.push_back(JoinCondition::CreateExpression(move(condition)));
-		}
-		// if we get here we could not create any JoinConditions
-		// turn this into an arbitrary expression join
-		auto any_join = make_unique<LogicalAnyJoin>(type);
-		// create the condition
-		any_join->children.push_back(move(left_child));
-		any_join->children.push_back(move(right_child));
-		// AND all the arbitrary expressions together
-		// do the same with any remaining conditions
-		any_join->condition = move(arbitrary_expressions[0]);
-		for (idx_t i = 1; i < arbitrary_expressions.size(); i++) {
-			any_join->condition = make_unique<BoundConjunctionExpression>(
-			    ExpressionType::CONJUNCTION_AND, move(any_join->condition), move(arbitrary_expressions[i]));
-		}
-		return move(any_join);
-	} else {
-		// we successfully converted expressions into JoinConditions
-		// create a LogicalComparisonJoin
-		auto comp_join = make_unique<LogicalComparisonJoin>(type);
-		comp_join->conditions = move(conditions);
-		comp_join->children.push_back(move(left_child));
-		comp_join->children.push_back(move(right_child));
-		if (!arbitrary_expressions.empty()) {
-			// we have some arbitrary expressions as well
-			// add them to a filter
-			auto filter = make_unique<LogicalFilter>();
-			for (auto &expr : arbitrary_expressions) {
-				filter->expressions.push_back(move(expr));
+		if (side == JoinSide::NONE) {
+			if (CanEliminate(context, type, expr)) {
+				continue;
 			}
-			LogicalFilter::SplitPredicates(filter->expressions);
-			filter->children.push_back(move(comp_join));
-			return move(filter);
+		} else if (side == JoinSide::LEFT) {
+			if (CanPushToLeftChild(type, ref_type)) {
+				PushFilterToChild(left_child, expr);
+				continue;
+			}
+		} else if (side == JoinSide::RIGHT) {
+			if (CanPushToRightChild(type, ref_type)) {
+				PushFilterToChild(right_child, expr);
+				continue;
+			}
+		} else if (side == JoinSide::BOTH) {
+			if (IsComparisonExpression(*expr) && IsJoinTypeCondition(ref_type, expr->GetExpressionType()) &&
+			    CreateJoinCondition(*expr, left_bindings, right_bindings, conditions)) {
+				continue;
+			}
 		}
-		return move(comp_join);
+
+		conditions.emplace_back(std::move(expr));
 	}
 }
 
-static bool HasCorrelatedColumns(Expression &expression) {
-	if (expression.type == ExpressionType::BOUND_COLUMN_REF) {
-		auto &colref = (BoundColumnRefExpression &)expression;
-		if (colref.depth > 0) {
-			return true;
+void LogicalComparisonJoin::ExtractJoinConditions(ClientContext &context, JoinType type, JoinRefType ref_type,
+                                                  unique_ptr<LogicalOperator> &left_child,
+                                                  unique_ptr<LogicalOperator> &right_child,
+                                                  vector<unique_ptr<Expression>> &expressions,
+                                                  vector<JoinCondition> &conditions) {
+	unordered_set<TableIndex> left_bindings, right_bindings;
+	LogicalJoin::GetTableReferences(*left_child, left_bindings);
+	LogicalJoin::GetTableReferences(*right_child, right_bindings);
+	return ExtractJoinConditions(context, type, ref_type, left_child, right_child, left_bindings, right_bindings,
+	                             expressions, conditions);
+}
+
+void LogicalComparisonJoin::ExtractJoinConditions(ClientContext &context, JoinType type, JoinRefType ref_type,
+                                                  unique_ptr<LogicalOperator> &left_child,
+                                                  unique_ptr<LogicalOperator> &right_child,
+                                                  unique_ptr<Expression> condition, vector<JoinCondition> &conditions) {
+	// split the expressions by the AND clause
+	vector<unique_ptr<Expression>> expressions;
+	expressions.push_back(std::move(condition));
+	LogicalFilter::SplitPredicates(expressions);
+	return ExtractJoinConditions(context, type, ref_type, left_child, right_child, expressions, conditions);
+}
+
+//! Create the join operator based on conditions and join type
+unique_ptr<LogicalOperator> LogicalComparisonJoin::CreateJoin(JoinType type, JoinRefType ref_type,
+                                                              unique_ptr<LogicalOperator> left_child,
+                                                              unique_ptr<LogicalOperator> right_child,
+                                                              vector<JoinCondition> conditions) {
+	// separate comparison and non-comparison conditions for validation
+	vector<JoinCondition> comparison_conditions;
+	vector<JoinCondition> non_comparison_conditions;
+	for (auto &cond : conditions) {
+		if (cond.IsComparison()) {
+			comparison_conditions.push_back(std::move(cond));
+		} else {
+			non_comparison_conditions.push_back(std::move(cond));
 		}
 	}
-	bool has_correlated_columns = false;
-	ExpressionIterator::EnumerateChildren(expression, [&](Expression &child) {
-		if (HasCorrelatedColumns(child)) {
-			has_correlated_columns = true;
+
+	// validate ASOF join conditions
+	auto is_asof = (ref_type == JoinRefType::ASOF);
+	if (is_asof) {
+		switch (type) {
+		case JoinType::RIGHT:
+		case JoinType::OUTER:
+			//	We can't (yet) support arbitrary predicates with some ASOF joins
+			if (!non_comparison_conditions.empty()) {
+				throw NotImplementedException("Unsupported ASOF JOIN type (%s) with arbitrary predicate",
+				                              EnumUtil::ToChars(type));
+			}
+			break;
+		case JoinType::SEMI:
+		case JoinType::ANTI:
+			//	For these join types, we can use a regular join because the RHS match is not important
+			//	But we will verify the requirements of an ASOF.
+			is_asof = false;
+			ref_type = JoinRefType::REGULAR;
+			break;
+		default:
+			break;
 		}
-	});
+		idx_t asof_idx = comparison_conditions.size();
+		for (size_t c = 0; c < comparison_conditions.size(); ++c) {
+			auto &cond = comparison_conditions[c];
+			switch (cond.GetComparisonType()) {
+			case ExpressionType::COMPARE_EQUAL:
+			case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+				break;
+			case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+			case ExpressionType::COMPARE_GREATERTHAN:
+			case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+			case ExpressionType::COMPARE_LESSTHAN:
+				if (asof_idx < comparison_conditions.size()) {
+					throw BinderException("Multiple ASOF JOIN inequalities");
+				}
+				asof_idx = c;
+				break;
+			default:
+				throw BinderException("Invalid ASOF JOIN comparison");
+			}
+		}
+		if (asof_idx >= comparison_conditions.size()) {
+			throw BinderException("Missing ASOF JOIN inequality");
+		}
+	}
+
+	// Reconstruct full conditions vector
+	vector<JoinCondition> all_conditions;
+	for (auto &cond : comparison_conditions) {
+		all_conditions.push_back(std::move(cond));
+	}
+	for (auto &cond : non_comparison_conditions) {
+		all_conditions.push_back(std::move(cond));
+	}
+
+	// what type of join to create now?
+	// Case 1: ASOF join - use comparison join (all conditions already in vector)
+	if (is_asof) {
+		auto asof_join = make_uniq<LogicalComparisonJoin>(type, LogicalOperatorType::LOGICAL_ASOF_JOIN);
+		asof_join->conditions = std::move(all_conditions);
+		asof_join->children.push_back(std::move(left_child));
+		asof_join->children.push_back(std::move(right_child));
+		return std::move(asof_join);
+	}
+
+	// Case 2: No comparison conditions - use any join
+	if (comparison_conditions.empty()) {
+		if (all_conditions.empty()) {
+			all_conditions.emplace_back(make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)));
+		}
+
+		auto any_join = make_uniq<LogicalAnyJoin>(type);
+		any_join->children.push_back(std::move(left_child));
+		any_join->children.push_back(std::move(right_child));
+		any_join->condition = JoinCondition::CreateExpression(std::move(all_conditions));
+		return std::move(any_join);
+	}
+
+	// Case 3: Has comparison conditions - Use comparison join
+	auto comp_join = make_uniq<LogicalComparisonJoin>(type, LogicalOperatorType::LOGICAL_COMPARISON_JOIN);
+	comp_join->conditions = std::move(all_conditions);
+	comp_join->children.push_back(std::move(left_child));
+	comp_join->children.push_back(std::move(right_child));
+
+	return std::move(comp_join);
+}
+
+static bool HasCorrelatedColumns(const Expression &root_expr) {
+	bool has_correlated_columns = false;
+	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(root_expr,
+	                                                              [&](const BoundColumnRefExpression &colref) {
+		                                                              if (colref.Depth() > 0) {
+			                                                              has_correlated_columns = true;
+		                                                              }
+	                                                              });
 	return has_correlated_columns;
 }
 
+unique_ptr<LogicalOperator> LogicalComparisonJoin::CreateJoin(ClientContext &context, JoinType type,
+                                                              JoinRefType reftype,
+                                                              unique_ptr<LogicalOperator> left_child,
+                                                              unique_ptr<LogicalOperator> right_child,
+                                                              unique_ptr<Expression> condition) {
+	vector<JoinCondition> conditions;
+	LogicalComparisonJoin::ExtractJoinConditions(context, type, reftype, left_child, right_child, std::move(condition),
+	                                             conditions);
+	return LogicalComparisonJoin::CreateJoin(type, reftype, std::move(left_child), std::move(right_child),
+	                                         std::move(conditions));
+}
+
 unique_ptr<LogicalOperator> Binder::CreatePlan(BoundJoinRef &ref) {
-	auto left = CreatePlan(*ref.left);
-	auto right = CreatePlan(*ref.right);
-	if (ref.type == JoinType::RIGHT && ClientConfig::GetConfig(context).enable_optimizer) {
+	auto old_is_outside_flattened = is_outside_flattened;
+	// Plan laterals from outermost to innermost
+	if (ref.lateral) {
+		// Set the flag to ensure that children do not flatten before the root
+		is_outside_flattened = false;
+	}
+	auto left = std::move(ref.left.plan);
+	auto right = std::move(ref.right.plan);
+	is_outside_flattened = old_is_outside_flattened;
+
+	// For joins, depth of the bindings will be one higher on the right because of the lateral binder
+	// If the current join does not have correlations between left and right, then the right bindings
+	// have depth 1 too high and can be reduced by 1 throughout
+	if (!ref.lateral && !ref.correlated_columns.empty()) {
+		LateralBinder::ReduceExpressionDepth(*right, ref.correlated_columns);
+	}
+
+	if (ref.type == JoinType::RIGHT && ref.ref_type != JoinRefType::ASOF &&
+	    !Optimizer::OptimizerDisabled(context, OptimizerType::BUILD_SIDE_PROBE_SIDE)) {
 		// we turn any right outer joins into left outer joins for optimization purposes
 		// they are the same but with sides flipped, so treating them the same simplifies life
 		ref.type = JoinType::LEFT;
 		std::swap(left, right);
 	}
-	if (ref.type == JoinType::INNER && (ref.condition->HasSubquery() || HasCorrelatedColumns(*ref.condition))) {
+	if (ref.lateral) {
+		auto new_plan = PlanLateralJoin(std::move(left), std::move(right), ref.correlated_columns, ref.type,
+		                                std::move(ref.condition));
+		if (has_unplanned_dependent_joins) {
+			RecursiveDependentJoinPlanner::Plan(*this, *new_plan);
+		}
+		return new_plan;
+	}
+	switch (ref.ref_type) {
+	case JoinRefType::CROSS:
+		return LogicalCrossProduct::Create(std::move(left), std::move(right));
+	case JoinRefType::POSITIONAL:
+		return LogicalPositionalJoin::Create(std::move(left), std::move(right));
+	default:
+		break;
+	}
+	if (ref.type == JoinType::INNER && (ref.condition->HasSubquery() || HasCorrelatedColumns(*ref.condition)) &&
+	    ref.ref_type == JoinRefType::REGULAR) {
 		// inner join, generate a cross product + filter
 		// this will be later turned into a proper join by the join order optimizer
-		auto root = LogicalCrossProduct::Create(move(left), move(right));
+		auto root = LogicalCrossProduct::Create(std::move(left), std::move(right));
 
-		auto filter = make_unique<LogicalFilter>(move(ref.condition));
+		auto filter = make_uniq<LogicalFilter>(std::move(ref.condition));
 		// visit the expressions in the filter
 		for (auto &expression : filter->expressions) {
-			PlanSubqueries(&expression, &root);
+			PlanSubqueries(expression, root);
 		}
-		filter->AddChild(move(root));
-		return move(filter);
+		filter->AddChild(std::move(root));
+		return std::move(filter);
 	}
-
-	// split the expressions by the AND clause
-	vector<unique_ptr<Expression>> expressions;
-	expressions.push_back(move(ref.condition));
-	LogicalFilter::SplitPredicates(expressions);
-
-	// find the table bindings on the LHS and RHS of the join
-	unordered_set<idx_t> left_bindings, right_bindings;
-	LogicalJoin::GetTableReferences(*left, left_bindings);
-	LogicalJoin::GetTableReferences(*right, right_bindings);
-	// now create the join operator from the set of join conditions
-	auto result = LogicalComparisonJoin::CreateJoin(ref.type, move(left), move(right), left_bindings, right_bindings,
-	                                                expressions);
-
-	LogicalOperator *join;
+	// now create the join operator from the join condition
+	auto result = LogicalComparisonJoin::CreateJoin(context, ref.type, ref.ref_type, std::move(left), std::move(right),
+	                                                std::move(ref.condition));
+	optional_ptr<LogicalOperator> join;
 	if (result->type == LogicalOperatorType::LOGICAL_FILTER) {
 		join = result->children[0].get();
 	} else {
 		join = result.get();
 	}
+
+	if (ref.type == JoinType::MARK) {
+		join->Cast<LogicalJoin>().mark_index = ref.mark_index;
+	}
 	for (auto &child : join->children) {
 		if (child->type == LogicalOperatorType::LOGICAL_FILTER) {
-			auto &filter = (LogicalFilter &)*child;
+			auto &filter = child->Cast<LogicalFilter>();
 			for (auto &expr : filter.expressions) {
-				PlanSubqueries(&expr, &filter.children[0]);
+				PlanSubqueries(expr, filter.children[0]);
 			}
 		}
 	}
 
 	// we visit the expressions depending on the type of join
-	if (join->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		// comparison join
-		// in this join we visit the expressions on the LHS with the LHS as root node
-		// and the expressions on the RHS with the RHS as root node
-		auto &comp_join = (LogicalComparisonJoin &)*join;
+	switch (join->type) {
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
+		auto &comp_join = join->Cast<LogicalComparisonJoin>();
 		for (idx_t i = 0; i < comp_join.conditions.size(); i++) {
-			PlanSubqueries(&comp_join.conditions[i].left, &comp_join.children[0]);
-			PlanSubqueries(&comp_join.conditions[i].right, &comp_join.children[1]);
+			auto &cond = comp_join.conditions[i];
+			if (cond.IsComparison()) {
+				PlanSubqueries(cond.LeftReference(), comp_join.children[0]);
+				PlanSubqueries(cond.RightReference(), comp_join.children[1]);
+			}
 		}
-	} else if (join->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
-		auto &any_join = (LogicalAnyJoin &)*join;
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_ANY_JOIN: {
+		auto &any_join = join->Cast<LogicalAnyJoin>();
 		// for the any join we just visit the condition
 		if (any_join.condition->HasSubquery()) {
 			throw NotImplementedException("Cannot perform non-inner join on subquery!");
+		}
+		break;
+	}
+	default:
+		break;
+	}
+	if (!ref.duplicate_eliminated_columns.empty()) {
+		auto &comp_join = join->Cast<LogicalComparisonJoin>();
+		comp_join.type = LogicalOperatorType::LOGICAL_DELIM_JOIN;
+		comp_join.delim_flipped = ref.delim_flipped;
+		for (auto &col : ref.duplicate_eliminated_columns) {
+			comp_join.duplicate_eliminated_columns.emplace_back(col->Copy());
 		}
 	}
 	return result;

@@ -14,19 +14,22 @@ namespace duckdb {
 
 class GZipFileSystem : public CompressedFileSystem {
 	// 32 KB
-	static constexpr const idx_t BUFFER_SIZE = 1 << 15;
+	static constexpr const idx_t BUFFER_SIZE = 1u << 15;
 
 public:
-	unique_ptr<FileHandle> OpenCompressedFile(unique_ptr<FileHandle> handle, bool write) override;
+	unique_ptr<FileHandle> OpenCompressedFile(QueryContext context, unique_ptr<FileHandle> handle, bool write) override;
 
 	std::string GetName() const override {
 		return "GZipFileSystem";
 	}
 
 	//! Verifies that a buffer contains a valid GZIP header
-	static void VerifyGZIPHeader(uint8_t gzip_hdr[], idx_t read_count);
+	static void VerifyGZIPHeader(uint8_t gzip_hdr[], idx_t read_count, optional_ptr<CompressedFile> source_file);
+	static bool CheckIsZip(const char *length, idx_t size);
+
 	//! Consumes a byte stream as a gzip string, returning the decompressed string
 	static string UncompressGZIPString(const string &in);
+	static string UncompressGZIPString(const char *length, idx_t size);
 
 	unique_ptr<StreamWrapper> CreateStream() override;
 	idx_t InBufferSize() override;
@@ -43,8 +46,11 @@ static constexpr const uint8_t GZIP_FLAG_COMMENT = 0x10;
 static constexpr const uint8_t GZIP_FLAG_ENCRYPT = 0x20;
 
 static constexpr const uint8_t GZIP_HEADER_MINSIZE = 10;
+// MAXSIZE should be the same as input buffer size
+static constexpr const idx_t GZIP_HEADER_MAXSIZE = 1u << 15;
+static constexpr const uint8_t GZIP_FOOTER_SIZE = 8;
 
 static constexpr const unsigned char GZIP_FLAG_UNSUPPORTED =
-    GZIP_FLAG_ASCII | GZIP_FLAG_MULTIPART | GZIP_FLAG_EXTRA | GZIP_FLAG_COMMENT | GZIP_FLAG_ENCRYPT;
+    GZIP_FLAG_ASCII | GZIP_FLAG_MULTIPART | GZIP_FLAG_COMMENT | GZIP_FLAG_ENCRYPT;
 
 } // namespace duckdb

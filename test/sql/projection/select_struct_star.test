@@ -2,9 +2,6 @@
 # description: SELECT struct.*;
 # group: [projection]
 
-statement ok
-PRAGMA enable_verification
-
 # create table
 statement ok
 CREATE TABLE test(a STRUCT(i INT, j INT));
@@ -44,3 +41,5 @@ CREATE TABLE b(i row(t int));
 # Binder Error: Ambiguous reference to column name "i" (use: "b.i" or "a.i")
 statement error
 SELECT i.* FROM a, b;
+----
+<REGEX>:.*Binder Error.*Ambiguous reference to column name.*

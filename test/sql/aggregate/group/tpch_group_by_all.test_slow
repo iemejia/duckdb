@@ -7,6 +7,9 @@ require tpch
 statement ok
 CALL dbgen(sf=0.01);
 
+statement ok
+SET debug_force_external=true;
+
 query I
 SELECT
     l_returnflag,

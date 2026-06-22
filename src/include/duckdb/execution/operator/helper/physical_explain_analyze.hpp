@@ -10,27 +10,37 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/main/profiler/profiler_print_format.hpp"
 
 namespace duckdb {
 
 class PhysicalExplainAnalyze : public PhysicalOperator {
 public:
-	PhysicalExplainAnalyze(vector<LogicalType> types)
-	    : PhysicalOperator(PhysicalOperatorType::EXPLAIN_ANALYZE, move(types), 1) {
+	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::EXPLAIN_ANALYZE;
+
+public:
+	PhysicalExplainAnalyze(PhysicalPlan &physical_plan, vector<LogicalType> types, ProfilerPrintFormat format)
+	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXPLAIN_ANALYZE, std::move(types), 1),
+	      format(std::move(format)) {
 	}
 
 public:
+	ProfilerPrintFormat format;
+
+public:
 	// Source interface
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	void GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-	             LocalSourceState &lstate) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
+
+	bool IsSource() const override {
+		return true;
+	}
 
 public:
 	// Sink Interface
-	SinkResultType Sink(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate,
-	                    DataChunk &input) const override;
+	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
-	                          GlobalSinkState &gstate) const override;
+	                          OperatorSinkFinalizeInput &input) const override;
 
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 

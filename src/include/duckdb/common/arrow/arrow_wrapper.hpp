@@ -9,12 +9,9 @@
 #pragma once
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/helper.hpp"
-#include "duckdb/common/preserved_error.hpp"
 
 //! Here we have the internal duckdb classes that interact with Arrow's Internal Header (i.e., duckdb/commons/arrow.hpp)
 namespace duckdb {
-class QueryResult;
-class DataChunk;
 
 class ArrowSchemaWrapper {
 public:
@@ -33,34 +30,37 @@ public:
 		arrow_array.length = 0;
 		arrow_array.release = nullptr;
 	}
+	ArrowArrayWrapper(ArrowArrayWrapper &&other) noexcept : arrow_array(other.arrow_array) {
+		other.arrow_array.release = nullptr;
+	}
+	ArrowArrayWrapper &operator=(ArrowArrayWrapper &&other) noexcept {
+		if (this != &other) {
+			if (arrow_array.release) {
+				arrow_array.release(&arrow_array);
+			}
+			arrow_array = other.arrow_array;
+			other.arrow_array.release = nullptr;
+		}
+		return *this;
+	}
 	~ArrowArrayWrapper();
 };
 
 class ArrowArrayStreamWrapper {
 public:
 	ArrowArrayStream arrow_array_stream;
-	int64_t number_of_rows;
 
 public:
 	void GetSchema(ArrowSchemaWrapper &schema);
 
-	shared_ptr<ArrowArrayWrapper> GetNextChunk();
+	virtual shared_ptr<ArrowArrayWrapper> GetNextChunk();
 
 	const char *GetError();
 
-	~ArrowArrayStreamWrapper();
+	virtual ~ArrowArrayStreamWrapper();
 	ArrowArrayStreamWrapper() {
 		arrow_array_stream.release = nullptr;
 	}
 };
 
-class ArrowUtil {
-public:
-	static bool TryFetchChunk(QueryResult *result, idx_t chunk_size, ArrowArray *out, idx_t &result_count,
-	                          PreservedError &error);
-	static idx_t FetchChunk(QueryResult *result, idx_t chunk_size, ArrowArray *out);
-
-private:
-	static bool TryFetchNext(QueryResult &result, unique_ptr<DataChunk> &out, PreservedError &error);
-};
 } // namespace duckdb

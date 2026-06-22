@@ -10,8 +10,12 @@
 
 #include "duckdb/transaction/undo_buffer.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/transaction/commit_state.hpp"
 
 namespace duckdb {
+
 class DataTable;
 
 struct DeleteInfo;
@@ -19,24 +23,22 @@ struct UpdateInfo;
 
 class CleanupState {
 public:
-	CleanupState();
-	~CleanupState();
+	explicit CleanupState(DuckTransaction &transaction, transaction_t lowest_active_transaction,
+	                      ActiveTransactionState transaction_state);
 
 public:
 	void CleanupEntry(UndoFlags type, data_ptr_t data);
 
 private:
-	// data for index cleanup
-	DataTable *current_table;
-	DataChunk chunk;
-	row_t row_numbers[STANDARD_VECTOR_SIZE];
-	idx_t count;
+	//! Lowest active transaction
+	transaction_t lowest_active_transaction;
+	ActiveTransactionState transaction_state;
+	//! While cleaning up, we remove data from any delta indexes we added data to during the commit
+	IndexDataRemover index_data_remover;
 
 private:
-	void CleanupDelete(DeleteInfo *info);
-	void CleanupUpdate(UpdateInfo *info);
-
-	void Flush();
+	void CleanupDelete(DeleteInfo &info);
+	void CleanupUpdate(UpdateInfo &info);
 };
 
 } // namespace duckdb

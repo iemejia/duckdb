@@ -3,6 +3,9 @@
 # group: [group]
 
 statement ok
+SET debug_force_external=true;
+
+statement ok
 CREATE TABLE test (a VARCHAR, b INTEGER);
 
 statement ok

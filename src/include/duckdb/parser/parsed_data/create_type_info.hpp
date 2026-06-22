@@ -9,42 +9,68 @@
 #pragma once
 
 #include "duckdb/parser/parsed_data/create_info.hpp"
-#include "duckdb/parser/column_definition.hpp"
-#include "duckdb/parser/constraint.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 
+#include "duckdb/common/identifier.hpp"
 namespace duckdb {
 
-struct CreateTypeInfo : public CreateInfo {
-	CreateTypeInfo() : CreateInfo(CatalogType::TYPE_ENTRY) {
+class TypeArgument {
+public:
+	TypeArgument(string name_p, Value value_p) : name(std::move(name_p)), value(std::move(value_p)) {
 	}
-	CreateTypeInfo(string name_p, LogicalType type_p)
-	    : CreateInfo(CatalogType::TYPE_ENTRY), name(move(name_p)), type(move(type_p)) {
+	const string &GetName() const {
+		return name;
+	}
+	const Value &GetValue() const {
+		return value;
+	}
+	bool HasName() const {
+		return !name.empty();
+	}
+	bool IsNamed(const char *name_to_check) const {
+		return StringUtil::CIEquals(name, name_to_check);
+	}
+	bool IsNotNull() const {
+		return !value.IsNull();
+	}
+	const LogicalType &GetType() const {
+		return value.type();
 	}
 
-	//! Name of the Type
+private:
 	string name;
+	Value value;
+};
+
+struct BindLogicalTypeInput {
+	optional_ptr<ClientContext> context;
+	const LogicalType &base_type;
+	const vector<TypeArgument> &modifiers;
+};
+
+//! The type to bind type modifiers to a type
+typedef LogicalType (*bind_logical_type_function_t)(BindLogicalTypeInput &input);
+
+struct CreateTypeInfo : public CreateInfo {
+	CreateTypeInfo();
+	CreateTypeInfo(string name_p, LogicalType type_p, bind_logical_type_function_t bind_function_p = nullptr);
+
+	//! Name of the Type
+	Identifier name;
 	//! Logical Type
 	LogicalType type;
 	//! Used by create enum from query
 	unique_ptr<SQLStatement> query;
+	//! Bind type modifiers to the type
+	bind_logical_type_function_t bind_function;
 
 public:
-	unique_ptr<CreateInfo> Copy() const override {
-		auto result = make_unique<CreateTypeInfo>();
-		CopyProperties(*result);
-		result->name = name;
-		result->type = type;
-		if (query) {
-			result->query = query->Copy();
-		}
-		return move(result);
-	}
+	unique_ptr<CreateInfo> Copy() const override;
 
-protected:
-	void SerializeInternal(Serializer &) const override {
-		throw NotImplementedException("Cannot serialize '%s'", CatalogTypeToString(CreateInfo::type));
-	}
+	DUCKDB_API void Serialize(Serializer &serializer) const override;
+	DUCKDB_API static unique_ptr<CreateInfo> Deserialize(Deserializer &deserializer);
+
+	string ToString() const override;
 };
 
 } // namespace duckdb

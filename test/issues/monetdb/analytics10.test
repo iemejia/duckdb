@@ -3,7 +3,7 @@
 # group: [monetdb]
 
 statement ok
-PRAGMA enable_verification
+SET default_null_order='nulls_first';
 
 statement ok
 CREATE TABLE tbl_ProductSales (ColID int, Product_Category  varchar(64), Product_Name  varchar(64), TotalSales int)
@@ -37,6 +37,7 @@ SELECT
     *
 FROM tbl_ProductSales
 GROUP BY ()
+----
 
 query I rowsort
 SELECT
@@ -83,6 +84,7 @@ SELECT
     CAST(SUM(TotalSales) as BIGINT) AS TotalSales
 FROM tbl_ProductSales
 GROUP BY ROLLUP ()
+----
 
 query TI rowsort
 SELECT
@@ -166,6 +168,7 @@ SELECT
     CAST(SUM(TotalSales) as BIGINT) AS TotalSales
 FROM tbl_ProductSales
 GROUP BY CUBE()
+----
 
 query TI rowsort
 SELECT
@@ -757,6 +760,7 @@ SELECT
     CAST(SUM(TotalSales) as BIGINT) AS TotalSales
 FROM tbl_ProductSales
 GROUP BY GROUPING SETS()
+----
 
 query I rowsort
 SELECT
@@ -941,8 +945,20 @@ query I rowsort
 SELECT
     CAST(SUM(TotalSales) as BIGINT) AS TotalSales
 FROM tbl_ProductSales
-GROUP BY ColID, GROUPING SETS (GROUPING SETS (()), (Product_Name), (Product_Category)) LIMIT 1 OFFSET 2
+GROUP BY ColID, GROUPING SETS (GROUPING SETS (()), (Product_Name), (Product_Category))
+ORDER BY 1
 ----
+100
+100
+100
+200
+200
+200
+400
+400
+400
+500
+500
 500
 
 query I rowsort

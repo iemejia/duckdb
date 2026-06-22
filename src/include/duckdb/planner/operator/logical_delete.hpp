@@ -8,41 +8,38 @@
 
 #pragma once
 
-#include "duckdb/common/field_writer.hpp"
 #include "duckdb/planner/logical_operator.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/planner/bound_constraint.hpp"
 
 namespace duckdb {
+class TableCatalogEntry;
 
 class LogicalDelete : public LogicalOperator {
 public:
-	explicit LogicalDelete(TableCatalogEntry *table)
-	    : LogicalOperator(LogicalOperatorType::LOGICAL_DELETE), table(table), table_index(0), return_chunk(false) {
-	}
-
-	TableCatalogEntry *table;
-	idx_t table_index;
-	bool return_chunk;
+	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_DELETE;
 
 public:
-	void Serialize(FieldWriter &writer) const override;
-	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	explicit LogicalDelete(TableCatalogEntry &table, TableIndex table_index);
+
+	TableCatalogEntry &table;
+	TableIndex table_index;
+	bool return_chunk;
+	vector<idx_t> return_columns;
+	vector<unique_ptr<BoundConstraint>> bound_constraints;
+
+public:
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
+
 	idx_t EstimateCardinality(ClientContext &context) override;
+	vector<TableIndex> GetTableIndex() const override;
+	string GetName() const override;
 
 protected:
-	vector<ColumnBinding> GetColumnBindings() override {
-		if (return_chunk) {
-			return GenerateColumnBindings(table_index, table->GetTypes().size());
-		}
-		return {ColumnBinding(0, 0)};
-	}
+	vector<ColumnBinding> GetColumnBindings() override;
+	void ResolveTypes() override;
 
-	void ResolveTypes() override {
-		if (return_chunk) {
-			types = table->GetTypes();
-		} else {
-			types.emplace_back(LogicalType::BIGINT);
-		}
-	}
+private:
+	LogicalDelete(ClientContext &context, const unique_ptr<CreateInfo> &table_info);
 };
 } // namespace duckdb

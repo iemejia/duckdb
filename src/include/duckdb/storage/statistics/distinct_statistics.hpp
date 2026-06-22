@@ -10,14 +10,13 @@
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/types/hyperloglog.hpp"
-#include "duckdb/storage/statistics/base_statistics.hpp"
 
 namespace duckdb {
+class Vector;
 class Serializer;
 class Deserializer;
-class Vector;
 
-class DistinctStatistics : public BaseStatistics {
+class DistinctStatistics {
 public:
 	DistinctStatistics();
 	explicit DistinctStatistics(unique_ptr<HyperLogLog> log, idx_t sample_count, idx_t total_count);
@@ -30,25 +29,29 @@ public:
 	atomic<idx_t> total_count;
 
 public:
-	void Merge(const BaseStatistics &other) override;
+	void Merge(const DistinctStatistics &other);
 
-	unique_ptr<BaseStatistics> Copy() const override;
+	unique_ptr<DistinctStatistics> Copy() const;
 
-	void Serialize(Serializer &serializer) const override;
-	void Serialize(FieldWriter &writer) const override;
+	void UpdateSample(const Vector &new_data, idx_t count, Vector &hashes);
+	void Update(const Vector &new_data, idx_t count, Vector &hashes);
 
-	static unique_ptr<DistinctStatistics> Deserialize(Deserializer &source);
-	static unique_ptr<DistinctStatistics> Deserialize(FieldReader &reader);
-
-	void Update(Vector &update, idx_t count, bool sample = true);
-	void Update(UnifiedVectorFormat &update_data, const LogicalType &ptype, idx_t count, bool sample = true);
-
-	string ToString() const override;
+	string ToString() const;
 	idx_t GetCount() const;
+
+	static bool TypeIsSupported(const LogicalType &type);
+
+	void Serialize(Serializer &serializer) const;
+	static unique_ptr<DistinctStatistics> Deserialize(Deserializer &deserializer);
+
+private:
+	void UpdateInternal(const Vector &update, idx_t count, Vector &hashes);
 
 private:
 	//! For distinct statistics we sample the input to speed up insertions
-	static constexpr const double SAMPLE_RATE = 0.1;
+	static constexpr double BASE_SAMPLE_RATE = 0.1;
+	//! For integers, we sample more: likely to be join keys (and hashing is cheaper than, e.g., strings)
+	static constexpr double INTEGRAL_SAMPLE_RATE = 0.3;
 };
 
 } // namespace duckdb
